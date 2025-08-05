@@ -1,0 +1,28 @@
+[project]
+name = "chlamydia_16s_dais"
+version = "0.1.0"
+description = "NASBA primer validation framework for Chlamydia trachomatis 16S rRNA detection"
+authors = [
+    {name = "gil", email = "gil.harari@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12.0,<4.0.0"
+
+[tool.poetry]
+name = "chlamydia_16s_dais"
+version = "0.1.0"
+description = "NASBA primer validation framework for Chlamydia trachomatis 16S rRNA detection"
+authors = ["gil <gil.harari@gmail.com>"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12"
+numpy = ">=1.21.0,<3.0.0"
+biopython = "^1.80"
+click = "^8.0"
+tqdm = "^4.60"
+nupack = { path = "./dependencies/nupack-4.0.1.9-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" }
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
