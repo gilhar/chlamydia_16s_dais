@@ -1,0 +1,4 @@
+biopython>=1.80
+nupack>=4.0.1.9
+click>=8.0
+numpy>=1.21.0
