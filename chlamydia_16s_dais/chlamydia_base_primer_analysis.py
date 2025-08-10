@@ -558,7 +558,7 @@ def run_primer_analysis(
 
     # Add canonical sequence if requested
     if include_canonical:
-        canonical_rna_seq = TWIST_CT_16S.replace('T', 'U')
+        canonical_rna_seq = TWIST_CT_16S
         canonical_record = SeqRecord(
             Seq(canonical_rna_seq),
             id="twist_ct_16s",
@@ -566,6 +566,11 @@ def run_primer_analysis(
         )
         sequences.append(canonical_record)
         print(f"Added 1 canonical twist_ct_16s sequence: {len(TWIST_CT_16S)} bp")
+
+    # convert sequences to RNA format
+    for record in sequences:
+        if 'T' in str(record.seq):
+            record.seq = record.seq.replace('T', 'U')
 
     print(f"Total sequences to analyze: {len(sequences)}")
 
