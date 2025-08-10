@@ -14,6 +14,10 @@ import nupack
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 import click
+from chlamydia_16s_dais.nupack_subprocess import (
+    analyze_sequence_complexes_subprocess,
+    SequenceParam,
+)
 
 
 # ============================================================================
@@ -36,7 +40,7 @@ class ComplexResult:
 
     complex_id: str
     size: int
-    concentration_M: float
+    concentration_molar: float
     sequence_id_map: Optional[Dict[int, str]] = (
         None  # Maps sequence_id (0-based) to sequence names
     )
@@ -52,7 +56,7 @@ class ComplexResult:
 class ComplexAnalysisResult:
     """Complete results from complex analysis."""
 
-    temperature_C: float
+    temperature_celsius: float
     ionic_conditions: Dict[str, float]
     max_complex_size: int
     total_sequences: int
@@ -62,77 +66,179 @@ class ComplexAnalysisResult:
         """Get all complexes of a specific size."""
         return [c for c in self.complexes if c.size == size]
 
-    def get_monomer_fraction(self, sequence_name: str) -> float:
-        """Calculate the fraction of a sequence that remains as monomer."""
-        monomers = [
-            c
-            for c in self.complexes
-            if c.size == 1 and sequence_name in c.sequence_id_map.values()
-        ]
-        total_monomer_conc = sum(c.concentration_M for c in monomers)
+    def get_monomer_fraction(
+        self, sequence_name: str, sequence_input_conc_molar: float
+    ) -> float:
+        """Return the fraction of a sequence that remains as monomer using the known input concentration.
 
-        # Calculate the total concentration of this sequence across all complexes
-        total_conc = 0.0
-        for complex_result in self.complexes:
-            if sequence_name in complex_result.sequence_id_map.values():
-                # Count how many times this sequence appears in the complex
-                count = sum(
-                    1
-                    for name in complex_result.sequence_id_map.values()
-                    if name == sequence_name
-                )
-                total_conc += complex_result.concentration_M * count
+        Specifically:
+            fraction = [monomer(sequence_name)] / sequence_input_conc_M
 
-        return total_monomer_conc / total_conc if total_conc > 0 else 0.0
+        Args:
+            sequence_name: Name of the sequence whose monomer fraction is requested
+            sequence_input_conc_molar: Tube input concentration (M) of the sequence
 
-    def get_hetero_dimer_fraction(self, seq1_name: str, seq2_name: str) -> float:
-        """Calculate the fraction of sequences bound as hetero-dimers."""
-        hetero_dimers = []
+        Raises:
+            ValueError: On invalid name or non-positive/None input concentration.
+        """
+        if not isinstance(sequence_name, str) or not sequence_name:
+            raise ValueError("sequence_name must be a non-empty string")
+        if sequence_input_conc_molar is None:
+            raise ValueError("sequence_input_conc_M must not be None")
+        if sequence_input_conc_molar <= 0:
+            raise ValueError("sequence_input_conc_M must be positive")
+
+        # Sum concentrations of monomer complexes for this sequence
+        monomer_conc = 0.0
+        for c in self.complexes:
+            if (
+                c.size == 1
+                and c.sequence_id_map
+                and sequence_name in c.sequence_id_map.values()
+            ):
+                monomer_conc += c.concentration_molar
+
+        return monomer_conc / sequence_input_conc_molar
+
+    def get_hetero_dimer_fraction(
+        self,
+        seq1_name: str,
+        seq2_name: str,
+        seq1_input_conc_molar: float,
+        seq2_input_conc_molar: float,
+    ) -> float:
+        """Return the hetero-dimer fraction relative to the limiting input concentration.
+
+        Specifically:
+            fraction = [hetero-dimer] / min(seq1_input_conc_M, seq2_input_conc_M)
+
+        Args:
+            seq1_name: Name of the first strand (must differ from seq2_name)
+            seq2_name: Name of the second strand (must differ from seq1_name)
+            seq1_input_conc_molar: Tube input concentration (M) of seq1
+            seq2_input_conc_molar: Tube input concentration (M) of seq2
+
+        Raises:
+            ValueError: On invalid names, equal names, or non-positive/None input concentrations.
+        """
+        # Validate parameters
+        if not isinstance(seq1_name, str) or not seq1_name:
+            raise ValueError("seq1_name must be a non-empty string")
+        if not isinstance(seq2_name, str) or not seq2_name:
+            raise ValueError("seq2_name must be a non-empty string")
+        if seq1_name == seq2_name:
+            raise ValueError(
+                "seq1_name and seq2_name must be different for hetero-dimer fraction"
+            )
+        if seq1_input_conc_molar is None or seq2_input_conc_molar is None:
+            raise ValueError("Input concentrations must not be None")
+        if seq1_input_conc_molar <= 0 or seq2_input_conc_molar <= 0:
+            raise ValueError("Input concentrations must be positive")
+
+        # Sum concentration of all hetero-dimer complexes containing exactly one copy of each
+        hetero_dimer_conc = 0.0
         for c in self.complexes:
             if c.size == 2 and c.sequence_id_map:
                 names = list(c.sequence_id_map.values())
-                if (
-                    seq1_name in names
-                    and seq2_name in names
-                    and names.count(seq1_name) == 1
-                    and names.count(seq2_name) == 1
-                ):
-                    hetero_dimers.append(c)
+                if names.count(seq1_name) == 1 and names.count(seq2_name) == 1:
+                    hetero_dimer_conc += c.concentration_molar
 
-        return sum(c.concentration_M for c in hetero_dimers)
-    
-    def get_homo_dimer_fraction(self, sequence_name: str) -> float:
-        """Calculate the fraction of a sequence bound as homo-dimers."""
-        homo_dimers = []
+        limiting = min(seq1_input_conc_molar, seq2_input_conc_molar)
+        return hetero_dimer_conc / limiting
+
+    def get_homo_dimer_fraction(
+        self, sequence_name: str, sequence_input_conc_molar: float
+    ) -> float:
+        """Return the homodimer fraction of the given strand relative to its input concentration.
+
+        For a homodimer A2, the fraction of A monomers that are in A2 is:
+            fraction = (2 * [A2]) / [A]_input
+
+        Args:
+            sequence_name: Name of the strand forming the homodimer (A in A2)
+            sequence_input_conc_molar: Tube input concentration (M) of the strand
+
+        Raises:
+            ValueError: On invalid name or non-positive/None input concentration.
+        """
+        if not isinstance(sequence_name, str) or not sequence_name:
+            raise ValueError("sequence_name must be a non-empty string")
+        if sequence_input_conc_molar is None:
+            raise ValueError("sequence_input_conc_M must not be None")
+        if sequence_input_conc_molar <= 0:
+            raise ValueError("sequence_input_conc_M must be positive")
+
+        homo_dimer_conc = 0.0
         for c in self.complexes:
             if c.size == 2 and c.sequence_id_map:
                 names = list(c.sequence_id_map.values())
-                # Homo-dimer: same sequence appears twice
+                # Homo-dimer: the same sequence appears twice
                 if names.count(sequence_name) == 2:
-                    homo_dimers.append(c)
-        
-        return sum(c.concentration_M for c in homo_dimers)
-    
-    def get_all_dimer_fractions(self, sequence_name: str) -> Dict[str, float]:
-        """Get comprehensive dimer analysis for a sequence."""
+                    homo_dimer_conc += c.concentration_molar
+
+        # Each A2 contains 2 copies of A
+        return (2.0 * homo_dimer_conc) / sequence_input_conc_molar
+
+    def get_all_dimer_fractions(
+        self, sequence_name: str, input_concentrations_molar: Dict[str, float]
+    ) -> Dict[str, float]:
+        """Get comprehensive dimer analysis for a sequence using provided input concentrations.
+
+        Args:
+            sequence_name: Name of the focal sequence
+            input_concentrations_molar: Mapping from the sequence name to its tube input concentration (M)
+
+        Returns:
+            Dict with keys:
+                - 'monomer': fraction of the sequence present as monomer (uses input concentration as denominator)
+                - 'homo_dimer': fraction of monomers of sequence_name present in homodimer (2*[A2]/[A]_in)
+                - 'hetero_dimers': dict mapping partner name -> fraction of limiting strand in AB
+        """
+        if not isinstance(sequence_name, str) or not sequence_name:
+            raise ValueError("sequence_name must be a non-empty string")
+        if (
+            not isinstance(input_concentrations_molar, dict)
+            or not input_concentrations_molar
+        ):
+            raise ValueError("input_concentrations_M must be a non-empty dict")
+        if sequence_name not in input_concentrations_molar:
+            raise ValueError(f"Missing input concentration for '{sequence_name}'")
+
         result = {
-            'monomer': self.get_monomer_fraction(sequence_name),
-            'homo_dimer': self.get_homo_dimer_fraction(sequence_name),
-            'hetero_dimers': {}
+            'monomer': self.get_monomer_fraction(
+                sequence_name, input_concentrations_molar[sequence_name]
+            ),
+            'homo_dimer': self.get_homo_dimer_fraction(
+                sequence_name, input_concentrations_molar[sequence_name]
+            ),
+            'hetero_dimers': {},
         }
-        
-        # Find all hetero-dimers involving this sequence
+
+        # Find all hetero-dimers involving this sequence and compute limiting-strand fractions
         for c in self.complexes:
             if c.size == 2 and c.sequence_id_map:
                 names = list(c.sequence_id_map.values())
-                if (sequence_name in names and 
-                    names.count(sequence_name) == 1):  # Appears once (hetero-dimer)
-                    # Find the other sequence
+                if sequence_name in names and names.count(sequence_name) == 1:
+                    # Identify the partner
                     other_name = [name for name in names if name != sequence_name][0]
+                    if other_name not in input_concentrations_molar:
+                        raise ValueError(
+                            f"Missing input concentration for hetero partner '{other_name}'"
+                        )
+                    frac = self.get_hetero_dimer_fraction(
+                        sequence_name,
+                        other_name,
+                        seq1_input_conc_molar=input_concentrations_molar[sequence_name],
+                        seq2_input_conc_molar=input_concentrations_molar[other_name],
+                    )
+                    # Store the maximum fraction observed across all heterodimers with the same partner
+                    # (though there should be at most one dimer species per pair)
                     if other_name not in result['hetero_dimers']:
                         result['hetero_dimers'][other_name] = 0.0
-                    result['hetero_dimers'][other_name] += c.concentration_M
-        
+                    result['hetero_dimers'][other_name] = max(
+                        result['hetero_dimers'][other_name], frac
+                    )
+
         return result
 
 
@@ -141,7 +247,7 @@ class ComplexAnalysisResult:
 # ============================================================================
 
 
-def analyze_sequence_complexes(
+def analyze_sequence_complexes_inprocess(
     temperature_celsius: float,
     sequences: List[SequenceInput],
     sodium_millimolar: float = 80.0,
@@ -150,18 +256,9 @@ def analyze_sequence_complexes(
     base_pairing_analysis: bool = False,
 ) -> ComplexAnalysisResult:
     """
-    Analyze sequence complexes using NUPACK API 4.0.1.9.
+    Analyze sequence complexes using NUPACK API 4.0.1.9 (in-process).
 
-    Args:
-        temperature_celsius: Temperature in Celsius
-        sequences: List of SequenceInput objects with name, sequence, and concentration
-        sodium_millimolar: Sodium concentration in mM
-        magnesium_millimolar: Magnesium concentration in mM
-        max_complex_size: Maximum complex size to analyze (default: 4)
-        base_pairing_analysis: Whether to calculate base-pairing probabilities (default: False)
-
-    Returns:
-        ComplexAnalysisResult with complex concentrations and optional base-pairing data
+    This function performs the computation in the current process.
     """
 
     # Create NUPACK model with ionic conditions
@@ -181,7 +278,7 @@ def analyze_sequence_complexes(
         nupack_strands[strand] = seq_input.concentration_M
         sequence_name_map[i] = seq_input.name
 
-    # Create tube with strands and concentrations
+    # Create the tube with strands and concentrations
     tube = nupack.Tube(
         strands=nupack_strands,
         complexes=nupack.SetSpec(max_size=max_complex_size),
@@ -189,7 +286,9 @@ def analyze_sequence_complexes(
     )
 
     # Run complex analysis
-    compute_list = ['pfunc'] + (['pairs'] if base_pairing_analysis else []) # noqa: typo
+    compute_list = ['pfunc'] + (
+        ['pairs'] if base_pairing_analysis else []
+    )  # noqa: typo
     results = nupack.tube_analysis(tubes=[tube], model=model, compute=compute_list)
 
     # Extract complex results
@@ -211,91 +310,183 @@ def analyze_sequence_complexes(
         complex_result = ComplexResult(
             complex_id=str(complex_spec),
             size=complex_size,
-            concentration_M=concentration,
+            concentration_molar=concentration,
             sequence_id_map=seq_id_map,
         )
 
         # Add base-pairing analysis if requested
         if base_pairing_analysis:
-            try:
-                # Extract pairing probabilities from NUPACK results
-                if hasattr(results, 'complexes') and complex_spec in results.complexes:
-                    complex_result_obj = results.complexes[complex_spec]
-                    
-                    if hasattr(complex_result_obj, 'pairs'):
-                        # Get the pairs array - this is a numpy 2D array
-                        pairs_array = complex_result_obj.pairs.to_array()
-                        
-                        # Build unpaired and pairing probabilities
-                        unpaired_prob = {}
-                        pairing_prob = {}
-                        
-                        # Calculate cumulative base positions for each strand in the complex
-                        strand_lengths = [len(str(strand)) for strand in complex_spec.strands]
-                        cumulative_positions = [0]  # Start positions for each strand
-                        for length in strand_lengths:
-                            cumulative_positions.append(cumulative_positions[-1] + length)
-                        
-                        # Extract unpaired probabilities (diagonal elements)
-                        for seq_id in range(complex_size):
-                            strand_start = cumulative_positions[seq_id]
-                            strand_length = strand_lengths[seq_id]
-                            
-                            for base_idx in range(strand_length):
-                                global_base_idx = strand_start + base_idx
-                                base_offset = base_idx + 1  # Convert to 1-based indexing
-                                
-                                # Unpaired probability is the diagonal element
-                                if global_base_idx < pairs_array.shape[0]:
-                                    unpaired_prob[(seq_id, base_offset)] = pairs_array[global_base_idx, global_base_idx]
-                        
-                        # Extract pairing probabilities (off-diagonal elements)
-                        for seq_id_1 in range(complex_size):
-                            strand_start_1 = cumulative_positions[seq_id_1]
-                            strand_length_1 = strand_lengths[seq_id_1]
-                            
-                            for base_idx_1 in range(strand_length_1):
-                                global_base_idx_1 = strand_start_1 + base_idx_1
-                                base_offset_1 = base_idx_1 + 1  # 1-based indexing
-                                
-                                for seq_id_2 in range(complex_size):
-                                    strand_start_2 = cumulative_positions[seq_id_2]
-                                    strand_length_2 = strand_lengths[seq_id_2]
-                                    
-                                    for base_idx_2 in range(strand_length_2):
-                                        global_base_idx_2 = strand_start_2 + base_idx_2
-                                        base_offset_2 = base_idx_2 + 1  # 1-based indexing
-                                        
-                                        # Skip diagonal (unpaired) and self-pairs
-                                        if global_base_idx_1 != global_base_idx_2:
-                                            if (global_base_idx_1 < pairs_array.shape[0] and 
-                                                global_base_idx_2 < pairs_array.shape[1]):
-                                                pair_prob = pairs_array[global_base_idx_1, global_base_idx_2]
-                                                
-                                                # Only store significant pairing probabilities
-                                                pairing_prob[(seq_id_1, base_offset_1, seq_id_2, base_offset_2)] = pair_prob
-                        
-                        complex_result.unpaired_probability = unpaired_prob
-                        complex_result.pairing_probability = pairing_prob
-
-            except Exception as e:
-                print(
-                    f"Warning: Could not calculate base-pairing probabilities for complex {complex_spec}: {e}"
+            # Extract pairing probabilities from NUPACK results
+            if not hasattr(results, 'complexes'):
+                raise RuntimeError("NUPACK results do not contain complexes")
+            if not complex_spec in results.complexes:
+                raise RuntimeError(
+                    f"NUPACK results do not contain complex {complex_spec}"
                 )
+            complex_result_obj = results.complexes[complex_spec]
+
+            if not hasattr(complex_result_obj, 'pairs'):
+                raise RuntimeError(
+                    "NUPACK results do not contain base-pairing probabilities"
+                )
+            # Get the pair's array - this is a numpy 2D array
+            pairs_array = complex_result_obj.pairs.to_array()
+
+            # Build unpaired and pairing probabilities
+            unpaired_prob = {}
+            pairing_prob = {}
+
+            # Calculate cumulative base positions for each strand in the complex
+            strand_lengths = [len(str(strand)) for strand in complex_spec.strands]
+            cumulative_positions = [0]  # Start positions for each strand
+            for length in strand_lengths:
+                cumulative_positions.append(cumulative_positions[-1] + length)
+
+            # Extract unpaired probabilities (diagonal elements)
+            for seq_id in range(complex_size):
+                strand_start = cumulative_positions[seq_id]
+                strand_length = strand_lengths[seq_id]
+
+                for base_idx in range(strand_length):
+                    global_base_idx = strand_start + base_idx
+                    base_offset = base_idx + 1  # Convert to 1-based indexing
+
+                    # Unpaired probability is the diagonal element
+                    if global_base_idx < pairs_array.shape[0]:
+                        unpaired_prob[(seq_id, base_offset)] = pairs_array[
+                            global_base_idx, global_base_idx
+                        ]
+
+            # Extract pairing probabilities (off-diagonal elements)
+            for seq_id_1 in range(complex_size):
+                strand_start_1 = cumulative_positions[seq_id_1]
+                strand_length_1 = strand_lengths[seq_id_1]
+
+                for base_idx_1 in range(strand_length_1):
+                    global_base_idx_1 = strand_start_1 + base_idx_1
+                    base_offset_1 = base_idx_1 + 1  # 1-based indexing
+
+                    for seq_id_2 in range(complex_size):
+                        strand_start_2 = cumulative_positions[seq_id_2]
+                        strand_length_2 = strand_lengths[seq_id_2]
+
+                        for base_idx_2 in range(strand_length_2):
+                            global_base_idx_2 = strand_start_2 + base_idx_2
+                            base_offset_2 = base_idx_2 + 1  # 1-based indexing
+
+                            # Skip diagonal (unpaired) and self-pairs
+                            if global_base_idx_1 != global_base_idx_2:
+                                if (
+                                    global_base_idx_1 >= pairs_array.shape[0]
+                                    or global_base_idx_2 >= pairs_array.shape[1]
+                                ):
+                                    raise RuntimeError(
+                                        f'indices ({global_base_idx_1}, {global_base_idx_2}) '
+                                        f'out of range for pairs_array shape {pairs_array.shape}'
+                                    )
+                                pair_prob = pairs_array[
+                                    global_base_idx_1, global_base_idx_2
+                                ]
+
+                                pairing_prob[
+                                    (seq_id_1, base_offset_1, seq_id_2, base_offset_2)
+                                ] = pair_prob
+
+            complex_result.unpaired_probability = unpaired_prob
+            complex_result.pairing_probability = pairing_prob
 
         complexes.append(complex_result)
 
     # Sort complexes by size then by concentration
-    complexes.sort(key=lambda x: (x.size, -x.concentration_M))
+    complexes.sort(key=lambda x: (x.size, -x.concentration_molar))
 
     return ComplexAnalysisResult(
-        temperature_C=temperature_celsius,
+        temperature_celsius=temperature_celsius,
         ionic_conditions={
             'sodium_mM': sodium_millimolar,
             'magnesium_mM': magnesium_millimolar,
         },
         max_complex_size=max_complex_size,
         total_sequences=len(sequences),
+        complexes=complexes,
+    )
+
+
+def analyze_sequence_complexes(
+    temperature_celsius: float,
+    sequences: List[SequenceInput],
+    sodium_millimolar: float = 80.0,
+    magnesium_millimolar: float = 12.0,
+    max_complex_size: int = 4,
+    base_pairing_analysis: bool = False,
+) -> ComplexAnalysisResult:
+    """
+    Analyze sequence complexes using a short-lived worker subprocess to avoid leaks.
+
+    This wrapper launches a one-shot worker process, passes the inputs as JSON,
+    parses the returned JSON, and rehydrates the standard ComplexAnalysisResult
+    data structures expected by callers.
+    """
+    # Build payload sequences for the worker
+    seq_params = [
+        SequenceParam(
+            name=s.name, sequence=s.sequence, concentration_M=s.concentration_M
+        )
+        for s in sequences
+    ]
+
+    result_dict = analyze_sequence_complexes_subprocess(
+        temperature_celsius=temperature_celsius,
+        sequences=seq_params,
+        sodium_millimolar=sodium_millimolar,
+        magnesium_millimolar=magnesium_millimolar,
+        max_complex_size=max_complex_size,
+        base_pairing_analysis=base_pairing_analysis,
+    )
+
+    # Rehydrate ComplexAnalysisResult / ComplexResult from JSON-friendly dict
+    complexes: List[ComplexResult] = []
+    for c in result_dict.get("complexes", []):
+        # sequence_id_map keys were stringified
+        seq_id_map = {int(k): v for k, v in (c.get("sequence_id_map") or {}).items()}
+
+        # Parse unpaired probabilities "seq:base" -> (seq, base)
+        unpaired = None
+        if c.get("unpaired_probability") is not None:
+            unpaired = {}
+            for k, v in c["unpaired_probability"].items():
+                seq_str, base_str = k.split(":")
+                unpaired[(int(seq_str), int(base_str))] = float(v)
+
+        # Parse pairing probabilities "s1:b1|s2:b2" -> (s1,b1,s2,b2)
+        pairing = None
+        if c.get("pairing_probability") is not None:
+            pairing = {}
+            for k, v in c["pairing_probability"].items():
+                left, right = k.split("|")
+                s1, b1 = left.split(":")
+                s2, b2 = right.split(":")
+                pairing[(int(s1), int(b1), int(s2), int(b2))] = float(v)
+
+        complexes.append(
+            ComplexResult(
+                complex_id=str(c["complex_id"]),
+                size=int(c["size"]),
+                concentration_molar=float(c["concentration_molar"]),
+                sequence_id_map=seq_id_map,
+                unpaired_probability=unpaired,
+                pairing_probability=pairing,
+            )
+        )
+
+    return ComplexAnalysisResult(
+        temperature_celsius=float(result_dict["temperature_celsius"]),
+        ionic_conditions={
+            'sodium_mM': float(result_dict["ionic_conditions"]["sodium_mM"]),
+            'magnesium_mM': float(result_dict["ionic_conditions"]["magnesium_mM"]),
+        },
+        max_complex_size=int(result_dict["max_complex_size"]),
+        total_sequences=int(result_dict["total_sequences"]),
         complexes=complexes,
     )
 
@@ -338,8 +529,13 @@ def analyze_primer_dais_binding(
         base_pairing_analysis=True,
     )
 
-    # Calculate hetero-dimer fraction
-    hetero_dimer_fraction = results.get_hetero_dimer_fraction(primer_name, dais_name)
+    # Calculate the hetero-dimer fraction (normalized by limiting input concentration)
+    hetero_dimer_fraction = results.get_hetero_dimer_fraction(
+        primer_name,
+        dais_name,
+        seq1_input_conc_molar=concentration_molar,
+        seq2_input_conc_molar=concentration_molar,
+    )
 
     # Calculate 3'-end unpaired probability for primer
     three_prime_unpaired_prob = 0.0
@@ -416,8 +612,10 @@ def analyze_four_primer_cross_reactivity(
     primer_results = {}
 
     for primer_name, primer_seq in primer_sequences.items():
-        # Calculate monomer fraction
-        monomer_fraction = results.get_monomer_fraction(primer_name)
+        # Calculate monomer fraction (normalized by known input concentration)
+        monomer_fraction = results.get_monomer_fraction(
+            primer_name, concentration_molar
+        )
 
         # Calculate 3'-end unpaired probability
         three_prime_unpaired_prob = 0.0
@@ -449,7 +647,7 @@ def analyze_four_primer_cross_reactivity(
                     prob2 = complex_result.unpaired_probability.get(base2_key, 0.0)
 
                     # Weight by complex concentration and take maximum
-                    complex_weight = complex_result.concentration_M
+                    complex_weight = complex_result.concentration_molar
                     weighted_prob = (prob1 * prob2) * complex_weight
                     three_prime_unpaired_prob = max(
                         three_prime_unpaired_prob, weighted_prob
@@ -509,7 +707,7 @@ def main(
     click.echo("=" * 60)
     click.echo("NUPACK COMPLEX ANALYSIS RESULTS")
     click.echo("=" * 60)
-    click.echo(f"Temperature: {results.temperature_C}°C")
+    click.echo(f"Temperature: {results.temperature_celsius}°C")
     click.echo(f"Ionic conditions: {results.ionic_conditions}")
     click.echo(f"Max complex size: {results.max_complex_size}")
     click.echo(f"Total sequences: {results.total_sequences}")
@@ -518,7 +716,7 @@ def main(
     for complex_result in results.complexes:
         click.echo(f"Complex: {complex_result.complex_id}")
         click.echo(f"  Size: {complex_result.size}")
-        click.echo(f"  Concentration: {complex_result.concentration_M:.2e} M")
+        click.echo(f"  Concentration: {complex_result.concentration_molar:.2e} M")
         if complex_result.sequence_id_map:
             click.echo(f"  Sequences: {complex_result.sequence_id_map}")
 

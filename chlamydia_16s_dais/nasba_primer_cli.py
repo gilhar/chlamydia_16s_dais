@@ -24,7 +24,10 @@ from nasba_primer_thermodynamics import (
     NASBA_MAGNESIUM_MOLAR,
     NASBA_PRIMER_CONCENTRATION_MOLAR,
 )
-from nasba_primer_validation import run_comprehensive_validation
+from nasba_primer_validation import (
+    run_comprehensive_validation,
+    build_validation_dataframe,
+)
 
 
 @click.group()
@@ -124,9 +127,15 @@ def validate():
     """
 
     # Run comprehensive validation
-    results = run_comprehensive_validation()
+    validation_data = run_comprehensive_validation()
+    # Export results
+    export_results = "validation_results.csv"
+    print(f"\nExporting results to {export_results}...")
+    df = build_validation_dataframe(validation_data['all_pairs'])
+    df.to_csv(export_results, index=False)
+    print(f"Wrote {len(df)} rows to {export_results}")
 
-    return results
+    return validation_data
 
 
 @cli.command()
@@ -146,13 +155,19 @@ def targets():
     print("  - Anchor should be almost fully bound (high specificity)")
     print("  - Toehold should be moderately bound (allows strand displacement)")
     print("  - Values are calculated using NUPACK thermodynamics at NASBA conditions")
-    print(f"    ({NASBA_TEMPERATURE_CELSIUS}°C, {NASBA_SODIUM_MOLAR*1000:.0f}mM Na+, {NASBA_MAGNESIUM_MOLAR*1000:.0f}mM Mg++, {NASBA_PRIMER_CONCENTRATION_MOLAR*1e9:.0f}nM primer concentration)")
+    print(
+        f"    ({NASBA_TEMPERATURE_CELSIUS}°C, {NASBA_SODIUM_MOLAR*1000:.0f}mM Na+, {NASBA_MAGNESIUM_MOLAR*1000:.0f}mM Mg++, {NASBA_PRIMER_CONCENTRATION_MOLAR*1e9:.0f}nM primer concentration)"
+    )
 
 
 @cli.command()
 @click.argument('sequence')
 @click.option(
-    '--temp', type=float, default=NASBA_TEMPERATURE_CELSIUS, show_default=True, help='Temperature in Celsius'
+    '--temp',
+    type=float,
+    default=NASBA_TEMPERATURE_CELSIUS,
+    show_default=True,
+    help='Temperature in Celsius',
 )
 def test_sequence(sequence, temp):
     """

@@ -21,7 +21,10 @@ numpy = ">=1.21.0,<3.0.0"
 biopython = "^1.80"
 click = "^8.0"
 tqdm = "^4.60"
-nupack = { path = "./dependencies/nupack-4.0.1.9-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" }
+nupack = { path = "./dependencies/nupack-4.0.1.12-cp313-cp313-linux_x86_64.whl" }
+#nupack = { path = "./dependencies/nupack-4.0.2.0-cp313-cp313-linux_x86_64.whl" }
+poetry-core = ">=1.0.0"
+pandas-stubs = "==2.3.0.250703"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

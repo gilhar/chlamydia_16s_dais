@@ -123,7 +123,6 @@ class NASBAPrimerCandidate:
         return len(self.full_sequence)
 
 
-
 # ============================================================================
 # BASE PRIMER DEFINITIONS
 # ============================================================================
@@ -132,123 +131,96 @@ class NASBAPrimerCandidate:
 def get_base_primers() -> Dict[str, Dict[str, BasePrimer]]:
     """Define the base primers with their binding positions in the canonical template."""
 
-    # Find binding positions in canonical template
     canonical = TWIST_CT_16S
     canonical_rc = str(Seq(canonical).reverse_complement())
 
-    base_primers = {}
+    # Centralized definition of primer pairs: ids, names, and sequences
+    primer_table = [
+        {
+            "id": "TETR",
+            "forward_name": "CTR 70",
+            "forward_seq": "GGCG" "A" "TATTTGGGCATCCGAGTAACG",  # modified for canonical
+            "reverse_name": "CTR 71",
+            "reverse_seq": "TCAAATCCAGCGGGTATTAACCG" "T" "CT",  # modified for canonical
+        },
+        {
+            "id": "S11",
+            "forward_name": "S11-F",
+            "forward_seq": "CATGCAAGTCGAACGGAGCAATTGTTTCGACGATT",
+            "reverse_name": "S11-R",
+            "reverse_seq": "CCAACTAGCTGATATCACATAGACTCTCCCTTAA",
+        },
+        {
+            "id": "IMRS",
+            "forward_name": "IMRS-F",
+            "forward_seq": "TGCTGC"
+            "A"
+            "TG"
+            "G"
+            "CTG"
+            "TCGTCAGCTCGT"
+            "GCCG",  # modified for canonical
+            "reverse_name": "IMRS-R",
+            "reverse_seq": "TG"
+            "GT"
+            "TA"
+            "ACCCAG"
+            "GC"
+            "AGT"
+            "CTC"
+            "G"
+            "TTAGAG",  # modified for canonical
+        },
+    ]
 
-    # TETR primers - modified to be compatible with the canonical sequence
-    # tetr_forward_seq = "GGCG"     "TATTTGGGCATCCGAGTAACG"  # noqa: typo
-    tetr_forward_seq = "GGCG" "A" "TATTTGGGCATCCGAGTAACG"  # noqa: typo
-    # tetr_reverse_seq = "TCAAATCCAGCGGGTATTAACCG" "C" "CT"  # noqa: typo
-    tetr_reverse_seq = "TCAAATCCAGCGGGTATTAACCG" "T" "CT" # noqa: typo
+    base_primers: Dict[str, Dict[str, BasePrimer]] = {}
 
-    # Find TETR forward in canonical (it should be there)
-    tetr_f_pos = canonical.find(tetr_forward_seq)
-    if tetr_f_pos == -1:
-        raise ValueError(
-            f"TETR forward primer sequence '{tetr_forward_seq}' not found in canonical template."
-        )
+    for row in primer_table:
+        pid = row["id"]
+        f_name, f_seq = row["forward_name"], row["forward_seq"]
+        r_name, r_seq = row["reverse_name"], row["reverse_seq"]
 
-    # Find TETR reverse in canonical RC #
-    tetr_r_pos = canonical_rc.find(tetr_reverse_seq)
-    if tetr_r_pos == -1:
-        raise ValueError(
-            f"TETR reverse primer sequence '{tetr_reverse_seq}' not found in canonical reverse complement."
-        )
+        # Locate forward primer in canonical
+        f_pos = canonical.find(f_seq)
+        if f_pos == -1:
+            raise ValueError(
+                f"{pid} forward primer sequence '{f_seq}' not found in canonical template."
+            )
 
-    # Convert reverse position to canonical coordinates
-    tetr_r_canonical_pos = len(canonical) - tetr_r_pos - len(tetr_reverse_seq)
+        # Locate reverse primer on reverse complement and convert to canonical coordinates
+        r_pos_rc = canonical_rc.find(r_seq)
+        if r_pos_rc == -1:
+            raise ValueError(
+                f"{pid} reverse primer sequence '{r_seq}' not found in canonical reverse complement."
+            )
+        r_start = len(canonical) - r_pos_rc - len(r_seq)
 
-    base_primers['TETR'] = {
-        'forward': BasePrimer(
-            name="CTR 70",
-            sequence=tetr_forward_seq,
-            binding_start=tetr_f_pos,
-            binding_end=(tetr_f_pos + len(tetr_forward_seq)),
-            is_forward=True,
-        ),
-        'reverse': BasePrimer(
-            name="CTR 71",
-            sequence=tetr_reverse_seq,
-            binding_start=tetr_r_canonical_pos,
-            binding_end=(tetr_r_canonical_pos + len(tetr_reverse_seq)),
-            is_forward=False,
-        ),
-    }
+        base_primers[pid] = {
+            "forward": BasePrimer(
+                name=f_name,
+                sequence=f_seq,
+                binding_start=f_pos,
+                binding_end=f_pos + len(f_seq),
+                is_forward=True,
+            ),
+            "reverse": BasePrimer(
+                name=r_name,
+                sequence=r_seq,
+                binding_start=r_start,
+                binding_end=r_start + len(r_seq),
+                is_forward=False,
+            ),
+        }
 
-    # S11 primers
-    s11_forward_seq = "CATGCAAGTCGAACGGAGCAATTGTTTCGACGATT"
-    s11_reverse_seq = "CCAACTAGCTGATATCACATAGACTCTCCCTTAA"
-
-    s11_f_pos = canonical.find(s11_forward_seq)
-    s11_r_pos = canonical.find(s11_reverse_seq)
-
-    base_primers['S11'] = {
-        'forward': BasePrimer(
-            name="S11-F",
-            sequence=s11_forward_seq,
-            binding_start=s11_f_pos,
-            binding_end=(s11_f_pos + len(s11_forward_seq)),
-            is_forward=True,
-        ),
-        'reverse': BasePrimer(
-            name="S11-R",
-            sequence=s11_reverse_seq,
-            binding_start=s11_r_pos,
-            binding_end=(s11_r_pos + len(s11_reverse_seq)),
-            is_forward=False,
-        ),
-    }
-
-    # IMRS primers - modified to be compatible with the canonical sequence
-    # noinspection SpellCheckingInspection
-    imrs_forward_seq = "TGCTGC" "A" "TG" "G" "CTG" "TCGTCAGCTCGT" "GCCG"  # noqa: typo
-    imrs_reverse_seq = "TG" "GT" "TA" "ACCCAG" "GC" "AGT" "CTC" "G" "TTAGAG"  # noqa: typo
-
-    # Find IMRS forward in canonical
-    imrs_f_pos = canonical.find(imrs_forward_seq)
-    if imrs_f_pos == -1:
-        raise ValueError(
-            f"IMRS forward primer sequence '{imrs_forward_seq}' not found in canonical template."
-        )
-
-    # Find IMRS reverse in canonical RC
-    imrs_r_pos = canonical_rc.find(imrs_reverse_seq)
-    if imrs_r_pos == -1:
-        raise ValueError(
-            f"IMRS reverse primer sequence '{imrs_reverse_seq}' not found in canonical reverse complement."
-        )
-
-    # Convert reverse position to canonical coordinates
-    imrs_r_canonical_pos = len(canonical) - imrs_r_pos - len(imrs_reverse_seq)
-
-    base_primers['IMRS'] = {
-        'forward': BasePrimer(
-            name="IMRS-F",
-            sequence=imrs_forward_seq,
-            binding_start=imrs_f_pos,
-            binding_end=(imrs_f_pos + len(imrs_forward_seq)),
-            is_forward=True,
-        ),
-        'reverse': BasePrimer(
-            name="IMRS-R",
-            sequence=imrs_reverse_seq,
-            binding_start=imrs_r_canonical_pos,
-            binding_end=(imrs_r_canonical_pos + len(imrs_reverse_seq)),
-            is_forward=False,
-        ),
-    }
-
+    # Preserve desired ordering
+    order = ["S11"]  # , "TETR", "IMRS"]
+    base_primers = {k: base_primers[k] for k in order}
     return base_primers
 
 
 # ============================================================================
 # MELTING TEMPERATURE CALCULATION
 # ============================================================================
-
-
 
 
 # ============================================================================
@@ -260,7 +232,7 @@ def extract_anchor_toehold_sequences(
     base_primer: BasePrimer, anchor_length: int, toehold_length: int
 ) -> Tuple[str, str]:
     """
-    Extract anchor and toehold sequences based on base primer 3'-end position.
+    Extract anchor and toehold sequences based on the base primer 3'-end position.
 
     Returns:
         Tuple of (anchor_sequence, toehold_sequence)
@@ -276,17 +248,21 @@ def extract_anchor_toehold_sequences(
         # Forward primer: extract from canonical template
         start_pos = end_pos - total_length + 1
         if start_pos < 0:
-            return "", ""  # Not enough bases in sequence
+            raise RuntimeError(
+                f'Extract forward: Not enough bases in sequence: {start_pos=} {end_pos=} {total_length=}'
+            )
 
         combined_seq = canonical[start_pos : end_pos + 1]
         anchor_seq = combined_seq[:anchor_length]
         toehold_seq = combined_seq[anchor_length:]
 
     else:
-        # Reverse primer: extract from reverse complement of canonical
+        # Reverse primer: extract from the reverse complement of canonical
         start_pos = end_pos - total_length + 1
         if start_pos < 0:
-            return "", ""  # Not enough bases in sequence
+            raise RuntimeError(
+                f'Extract reverse: Not enough bases in sequence: {start_pos=} {end_pos=} {total_length=}'
+            )
 
         combined_seq = canonical_rc[start_pos : end_pos + 1]
         anchor_seq = combined_seq[:anchor_length]
@@ -316,7 +292,10 @@ def generate_nasba_primer_candidates(
             )
 
             if not anchor_seq or not toehold_seq:
-                continue  # Skip if sequences couldn't be extracted
+                raise RuntimeError(
+                    f'Generate NASBA primer candidate: anchor or toehold sequence is empty'
+                    f' (anchor_len={anchor_len}, toehold_len={toehold_len})'
+                )
 
             # Build full NASBA primer sequence
             if base_primer.is_forward:
@@ -373,8 +352,12 @@ def print_candidate_summary(
         for i, candidate in enumerate(candidates[:3], 1):
             print(f"  {i}. {candidate.primer_type.title()} primer:")
             print(f"     Sequence: {candidate.full_sequence}")
-            print(f"     Anchor: {candidate.anchor_sequence} (length: {candidate.anchor_length})")
-            print(f"     Toehold: {candidate.toehold_sequence} (length: {candidate.toehold_length})")
+            print(
+                f"     Anchor: {candidate.anchor_sequence} (length: {candidate.anchor_length})"
+            )
+            print(
+                f"     Toehold: {candidate.toehold_sequence} (length: {candidate.toehold_length})"
+            )
     else:
         print("  No candidates generated")
 
@@ -427,6 +410,7 @@ def analyze_all_combinations(
 # ============================================================================
 # MAIN FUNCTION
 # ============================================================================
+
 
 def main():
     """Main function for NASBA primer generation."""

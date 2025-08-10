@@ -33,7 +33,8 @@ global GLOBAL_DEBUG
 # ============================================================================
 
 # Canonical CT 16S sequence (DNA format - converted to RNA during analysis)
-TWIST_CT_16S = """
+TWIST_CT_16S = (
+    """
     CTGAGAATTTGATCTTGGTTCAGATTGAACGCTGGCGGCGTGGATGAGGCATGCAAGTCGAACGGAGCAATTGT
     TTCGACGATTGTTTAGTGGCGGAAGGGTTAGTAATGCATAGATAATTTGTCCTTAACTTGGGAATAACGGTTGG
     AAACGGCCGCTAATACCGAATGTGGCGATATTTGGGCATCCGAGTAACGTTAAAGAAGGGGATCTTAGGACCTT
@@ -56,11 +57,10 @@ TWIST_CT_16S = """
     CCCGTCACATCATGGGAGTTGGTTTTACCTTAAGTCGTTGACTCAACCCGCAAGGGAGAGAGGCGCCCAAGGTG
     AGGCTGATGACTAGGATGAAGTCGTAACAAGGTAGCCCTACCGGAAGGTGGGGCTGGATCACCTCCTTT
 """.replace(
-    '\n', ''
-).replace(
-    ' ', ''
-).replace(
-    '\t', ''
+        '\n', ''
+    )
+    .replace(' ', '')
+    .replace('\t', '')
 )  # Remove whitespace for easier processing
 
 # Alignment configurations
@@ -155,22 +155,28 @@ def get_primer_pairs() -> Dict[str, PrimerPair]:
     """Define and return all primer pairs with their configurations."""
 
     # TETR primer pair
-    # tetr_forward = Primer("CTR 70", "GGCGTATTTGGGCATCCGAGTAACG")
+    # tetr_forward = Primer("CTR 70", "GGCGTATTTGGGCATCCGAGTAACG") # noqa: typo
     # modified by a single insertion to match the "canonical" sequence
-    tetr_forward = Primer("CTR 70", "GGCG" "A" "TATTTGGGCATCCGAGTAACG")
-    # tetr_reverse = Primer("CTR 71", "TCAAATCCAGCGGGTATTAACCGCCT")
+    tetr_forward = Primer("CTR 70", "GGCG" "A" "TATTTGGGCATCCGAGTAACG")  # noqa: typo
+    # tetr_reverse = Primer("CTR 71", "TCAAATCCAGCGGGTATTAACCGCCT") # noqa: typo
     # modified by a single mutation to match the "canonical" sequence
-    tetr_reverse = Primer("CTR 71", "TCAAATCCAGCGGGTATTAACCGTCT")
+    tetr_reverse = Primer("CTR 71", "TCAAATCCAGCGGGTATTAACCGTCT")  # noqa: typo
 
     # S11 primer pair
-    s11_forward = Primer("S11-F", "CATGCAAGTCGAACGGAGCAATTGTTTCGACGATT")
-    s11_reverse = Primer("S11-R", "CCAACTAGCTGATATCACATAGACTCTCCCTTAA")
+    s11_forward = Primer("S11-F", "CATGCAAGTCGAACGGAGCAATTGTTTCGACGATT")  # noqa: typo
+    s11_reverse = Primer("S11-R", "CCAACTAGCTGATATCACATAGACTCTCCCTTAA")  # noqa: typo
 
     # IMRS primer pair (requires relaxed parameters)
-    # imrs_forward = Primer("IMRS-F",              "TGCTGC"     "TG"     "CTG"      "ATTACGA" "GCCG" "A")
-    imrs_forward = Primer("IMRS-F", "TGCTGC" "A" "TG" "G" "CTG" "TCGTCAGCTCGT" "GCCG")
-    # imrs_reverse = Primer("IMRS-R",              "TG"      "TA" "GGAGGA" "GC"       "CTC"     "TTAGAG" "AA")
-    imrs_reverse = Primer("IMRS-R", "TG" "GT" "TA" "ACCCAG" "GC" "AGT" "CTC" "G" "TTAGAG")
+    # imrs_forward = Primer("IMRS-F",              "TGCTGC"     "TG"     "CTG"      "ATTACGA" "GCCG" "A") # noqa: typo
+    imrs_forward = Primer(
+        "IMRS-F",
+        "TGCTGC" "A" "TG" "G" "CTG" "TCGTCAGCTCGT" "GCCG",  # noqa: typo
+    )  # noqa: typo
+    # imrs_reverse = Primer("IMRS-R",              "TG"      "TA" "GGAGGA" "GC"       "CTC"     "TTAGAG" "AA") # noqa: typo
+    imrs_reverse = Primer(
+        "IMRS-R",
+        "TG" "GT" "TA" "ACCCAG" "GC" "AGT" "CTC" "G" "TTAGAG",  # noqa: typo
+    )  # noqa: typo
 
     return {
         'TETR': PrimerPair(tetr_forward, tetr_reverse, "TETR", STANDARD_CONFIG),
@@ -232,9 +238,9 @@ def align_primer_to_sequence(
         if alignment.score >= min_score:
             try:
                 if len(alignment.aligned) >= 2 and len(alignment.aligned[1]) > 0:
-                    target_coords = alignment.aligned[1]
-                    target_start = int(target_coords[0][0])
-                    target_end = int(target_coords[-1][1])
+                    target_offsets = alignment.aligned[1]
+                    target_start = int(target_offsets[0][0])
+                    target_end = int(target_offsets[-1][1])
 
                     # Extract binding site sequence
                     binding_sequence = target_str[target_start:target_end]
@@ -536,7 +542,6 @@ def run_primer_analysis(
         fasta_file: Path to FASTA file with 16S sequences
         include_canonical: Whether to include canonical sequence in analysis
         max_sequences: Maximum number of sequences to analyze (None for all)
-        top_n: Number of top binding sites to display
 
     Returns:
         Dictionary with complete analysis results
@@ -639,7 +644,7 @@ def run_primer_analysis(
     '--no-canonical', is_flag=True, help='Exclude canonical sequence from analysis'
 )
 @click.option('--debug', is_flag=True, help='Enable debug output')
-def main(fasta_file, max_sequences, top_n, no_canonical, debug):
+def main(fasta_file, max_sequences, no_canonical, debug):
     """Analyze Chlamydia trachomatis 16S rRNA primer binding sites."""
     global GLOBAL_DEBUG
     GLOBAL_DEBUG = debug
