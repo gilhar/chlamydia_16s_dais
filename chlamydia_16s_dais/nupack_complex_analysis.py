@@ -12,6 +12,10 @@ Date: 2025
 
 import nupack
 from typing import Dict, List, Tuple, Optional
+try:
+    from .nasba_primer_thermodynamics import NASBA_CONDITIONS
+except ImportError:
+    from nasba_primer_thermodynamics import NASBA_CONDITIONS
 from dataclasses import dataclass
 import click
 from chlamydia_16s_dais.nupack_subprocess import (
@@ -501,10 +505,10 @@ def analyze_primer_dais_binding(
     dais_sequence: str,
     primer_name: str = "primer",
     dais_name: str = "dais",
-    temperature_celsius: float = 41.0,
+    temperature_celsius: float = NASBA_CONDITIONS['target_temp_C'],
     concentration_nanomolar: float = 250.0,
-    sodium_millimolar: float = 80.0,
-    magnesium_millimolar: float = 12.0,
+    sodium_millimolar: float = NASBA_CONDITIONS['Na_mM'],
+    magnesium_millimolar: float = NASBA_CONDITIONS['Mg_mM'],
 ) -> Tuple[float, float]:
     """
     Analyze primer-dais binding and return hetero-dimer fraction and 3'-end unpaired probability.
@@ -573,10 +577,10 @@ def analyze_primer_dais_binding(
 
 def analyze_four_primer_cross_reactivity(
     primer_sequences: Dict[str, str],
-    temperature_celsius: float = 41.0,
+    temperature_celsius: float = NASBA_CONDITIONS['target_temp_C'],
     concentration_nanomolar: float = 250.0,
-    sodium_millimolar: float = 80.0,
-    magnesium_millimolar: float = 12.0,
+    sodium_millimolar: float = NASBA_CONDITIONS['Na_mM'],
+    magnesium_millimolar: float = NASBA_CONDITIONS['Mg_mM'],
 ) -> Dict[str, Tuple[float, float]]:
     """
     Analyze cross-reactivity between four primers.
@@ -664,7 +668,7 @@ def analyze_four_primer_cross_reactivity(
 
 
 @click.command()
-@click.option('--temperature', '-T', default=41.0, help='Temperature in Celsius')
+@click.option('--temperature', '-T', default=NASBA_CONDITIONS['target_temp_C'], help='Temperature in Celsius')
 @click.option('--sodium', default=80.0, help='Sodium concentration in mM')
 @click.option('--magnesium', default=12.0, help='Magnesium concentration in mM')
 @click.option('--max-size', default=4, help='Maximum complex size to analyze')

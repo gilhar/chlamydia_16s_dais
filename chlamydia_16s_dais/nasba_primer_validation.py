@@ -16,13 +16,14 @@ Date: 2025
 
 import os
 import sys
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 
 import click
 from Bio.Seq import Seq
 from Bio import SeqIO
 import pandas as pd
+
 
 # Import from the main NASBA primer module
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -34,14 +35,13 @@ from chlamydia_nasba_primer import (
 from nasba_primer_thermodynamics import (
     calculate_primer_bound_fractions,
     validate_bound_fractions,
-    calculate_3_prime_unpaired_probability_weighted,
     analyze_multi_primer_solution,
-    calculate_primer_analysis_comprehensive,
+    analyze_sequence_comprehensive,
     DEFAULT_ASSAY_CONCENTRATIONS,
     NASBA_TEMPERATURE_CELSIUS,
     NASBA_SODIUM_MOLAR,
     NASBA_MAGNESIUM_MOLAR,
-    NASBA_PRIMER_CONCENTRATION_MOLAR,
+    NASBA_PRIMER_CONCENTRATION_MOLAR, calculate_weighted_three_prime_end_paired_probabilities, NASBA_CONDITIONS,
 )
 from nupack_complex_analysis import (
     SequenceInput,
@@ -246,8 +246,7 @@ VALIDATION_THRESHOLDS = {
 # NASBA primer testing conditions - using centralized constants
 TESTING_CONDITIONS = {
     'temperature_C': NASBA_TEMPERATURE_CELSIUS,
-    'primer_concentration_nM': NASBA_PRIMER_CONCENTRATION_MOLAR
-    * 1e9,  # Convert M to nM
+    'primer_concentration_nM': NASBA_PRIMER_CONCENTRATION_MOLAR * 1e9,  # Convert M to nM
     'dais_concentration_nM': 250,  # 250nM
     'signal_concentration_pM': 10,  # 10pM for signal binding tests
     'generic_primer_concentration_nM': 25,  # 25nM for generic primer tests
@@ -293,7 +292,7 @@ class ValidationResult:
     hetero_dimer_fraction: Optional[float] = None
     monomer_fraction: Optional[float] = None
     unpaired_3_prime_prob: Optional[float] = None
-    unpaired_3_prime_probs: Optional[List[float]] = None
+    unpaired_3_prime_probs: Optional[Tuple[float, ...]] = None
     passed: bool = False
     details: str = ""
 
@@ -469,14 +468,14 @@ def generate_daises(primers: List[ValidationPrimer]) -> List[Dais]:
     unique_daises = {}
 
     for primer in primers:
-        # Create key for deduplication
+        # Create a key for deduplication
         key = (primer.species, primer.primer_type)
 
         if key not in unique_daises:
             # Dais is the reverse complement of the anchor sequence
             dais_sequence = str(Seq(primer.anchor_sequence).reverse_complement())
 
-            # Create generic name without generic set identifier
+            # Create a generic name without a generic set identifier
             dais_name = f"dais-{primer.species}-{primer.primer_type}"
 
             dais = Dais(
@@ -499,7 +498,7 @@ def generate_daises(primers: List[ValidationPrimer]) -> List[Dais]:
 def calculate_dimer_formation_probability_with_assay_concentrations(
     seq1: str,
     seq2: str,
-    temperature_celsius: float = 41,
+    temperature_celsius: float = NASBA_CONDITIONS['target_temp_C'],
     assay_type: str = "primer_dais_binding",
 ) -> float:
     """
@@ -529,8 +528,8 @@ def calculate_dimer_formation_probability_with_assay_concentrations(
         seq1_conc = concentrations.primer_dais_binding['primer_concentration_M']
         seq2_conc = concentrations.primer_dais_binding['target_dais_concentration_M']
     elif assay_type == "cross_reactivity":
-        seq1_conc = concentrations.cross_reactivity['primer_concentration_M']
-        seq2_conc = concentrations.cross_reactivity['other_sequence_concentration_M']
+        seq1_conc = concentrations.primer_non_signal_cross_reactivity['primer_concentration_M']
+        seq2_conc = concentrations.primer_non_signal_cross_reactivity['other_sequence_concentration_M']
     elif assay_type == "off_target_dais":
         seq1_conc = concentrations.off_target_dais['primer_concentration_M']
         seq2_conc = concentrations.off_target_dais['non_intended_dais_concentration_M']
@@ -569,7 +568,7 @@ def calculate_dimer_formation_probability_with_assay_concentrations(
 
 def calculate_3_prime_unpaired_probability(
     primer_seq: str, competing_sequences: List[str]
-) -> list[float]:
+) -> tuple[float, float, tuple[float, ...]]:
     """
     Calculate the concentration-weighted probability that the 3'-end bases of primer remain unpaired.
 
@@ -596,26 +595,26 @@ def calculate_3_prime_unpaired_probability(
             "No competing sequences provided. Cannot calculate unpaired probability without competition."
         )
 
-    # Create lists for multi-strand analysis
-    all_sequences = [primer_seq] + competing_sequences
-    all_names = ['target_primer'] + [
-        f'competing_{i}' for i in range(len(competing_sequences))
-    ]
-    all_concentrations = [NASBA_PRIMER_CONCENTRATION_MOLAR] * len(all_sequences)
-
-    # Use concentration-weighted calculation for thermodynamically correct result
-    return calculate_3_prime_unpaired_probability_weighted(
-        target_sequence=primer_seq,
-        target_name='target_primer',
-        all_sequences=all_sequences,
-        all_names=all_names,
-        all_concentrations=all_concentrations,
-        n_bases=2,  # Check last 2 bases
-        temp_celsius=NASBA_TEMPERATURE_CELSIUS,
-        sodium_molar=NASBA_SODIUM_MOLAR,
-        magnesium_molar=NASBA_MAGNESIUM_MOLAR,
+    comprehensive_result = analyze_sequence_comprehensive(
+        primary_sequence=primer_seq,
+        primary_sequence_name='target_primer',
+        primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM'] * 1e-9,
+        other_sequences={
+            f'competing_{i}': competing_sequences[i]
+            for i in range(len(competing_sequences))
+        },
+        other_sequence_concentrations={
+            f'competing{i}': TESTING_CONDITIONS['competition_concentration_nM'] * 1e-9
+            for i in range(len(competing_sequences))
+        },
+        temp_celsius=NASBA_CONDITIONS['target_temp_C'],
+        n_bases=3,
     )
-
+    return (
+        comprehensive_result.primary_monomer_fraction,
+        comprehensive_result.weighted_three_prime_unpaired_prob,
+        comprehensive_result.weighted_three_prime_unpaired_probs,
+    )
 
 # ============================================================================
 # VALIDATION TESTS
@@ -734,7 +733,7 @@ def test_1_hetero_dimer_measurements(
             calculate_dimer_formation_probability_with_assay_concentrations(
                 primer.sequence,
                 target_dais.sequence,
-                TESTING_CONDITIONS['temperature_C'],
+                NASBA_CONDITIONS['target_temp_C'],
                 assay_type="primer_dais_binding",
             )
         )
@@ -820,9 +819,9 @@ def test_2_four_primer_cross_reactivity(
                 primer_names=primer_names,
                 primer_concentrations=primer_concentrations,
                 n_bases=2,
-                temp_celsius=NASBA_TEMPERATURE_CELSIUS,
-                sodium_molar=NASBA_SODIUM_MOLAR,
-                magnesium_molar=NASBA_MAGNESIUM_MOLAR,
+                temp_celsius=NASBA_CONDITIONS['target_temp_C'],
+                sodium_molar=NASBA_CONDITIONS['Na_mM'] / 1e3,
+                magnesium_molar=NASBA_CONDITIONS['Mg_mM'] / 1e3,
             )
 
             # Process results for each primer
@@ -831,6 +830,7 @@ def test_2_four_primer_cross_reactivity(
 
                 monomer_fraction = primer_result["monomer_fraction"]
                 unpaired_3_prime_prob = primer_result["weighted_unpaired_prob"]
+                unpaired_3_prime_probs = primer_result["weighted_unpaired_probs"]
 
                 # Check if both criteria are met
                 monomer_pass = (
@@ -851,6 +851,7 @@ def test_2_four_primer_cross_reactivity(
                     target_dais=[p.name for p in other_primers],
                     monomer_fraction=monomer_fraction,
                     unpaired_3_prime_prob=unpaired_3_prime_prob,
+                    unpaired_3_prime_probs=unpaired_3_prime_probs,
                     passed=overall_pass,
                     details=f"Monomer: {monomer_fraction:.3f} ({'✓' if monomer_pass else '✗'}), "
                     f"3'-unpaired: {unpaired_3_prime_prob:.4f} ({'✓' if unpaired_pass else '✗'})",
@@ -901,7 +902,7 @@ def test_3_individual_primer_dais_binding(
         # Logic: Each primer should NOT bind to:
         # 1. The dais from the other species with the same primer_type and generic_set
         # 2. The dais from the same species with opposite primer_type and the same generic_set
-        # 3. The dais from the same species, same primer_type but opposite generic_set
+        # 3. The dais from the same species, the same primer_type but opposite generic_set
         for dais in all_daises:
             should_not_bind = False
 
@@ -933,14 +934,23 @@ def test_3_individual_primer_dais_binding(
 
             # Calculate both monomer fraction and 3'-end unpaired probability
             # from a single multi-sequence NUPACK analysis
-            monomer_fraction, unpaired_3_prime_prob = (
-                calculate_primer_analysis_comprehensive(
-                    primer.sequence,
-                    non_target_sequences,
-                    TESTING_CONDITIONS['temperature_C'],
-                    assay_type="off_target_dais",
+            monomer_fraction, unpaired_3_prime_prob, unpaired_3_prime_probs = (
+                analyze_sequence_comprehensive(
+                    primary_sequence=primer.sequence,
+                    primary_sequence_name=f'primer_{primer.name}',
+                    primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM'] * 1e-9,
+                    other_sequences={
+                        dais.name: dais.sequence for dais in non_target_sequences
+                    },
+                    other_sequence_concentrations={
+                        dais.name: TESTING_CONDITIONS['dais_concentration_nM'] * 1e-9
+                        for dais in non_target_sequences
+                    },
+                    temp_celsius=NASBA_CONDITIONS['target_temp_C'],
+                    n_bases=3,
                 )
             )
+
 
             # Check if both criteria are met
             monomer_pass = (
@@ -959,6 +969,7 @@ def test_3_individual_primer_dais_binding(
                 target_dais=non_target_names,
                 monomer_fraction=monomer_fraction,
                 unpaired_3_prime_prob=unpaired_3_prime_prob,
+                unpaired_3_prime_probs=unpaired_3_prime_probs,
                 passed=overall_pass,
                 details=f"Monomer: {monomer_fraction:.3f} ({'✓' if monomer_pass else '✗'}), "
                 f"3'-unpaired: {unpaired_3_prime_prob:.4f} ({'✓' if unpaired_pass else '✗'})",
@@ -1078,12 +1089,15 @@ def test_4_primer_signal_binding_specificity(
             TESTING_CONDITIONS['signal_concentration_pM'] * 1e-12
         )  # Convert pM to M
 
+        primer_seq_name = f'primer_{primer.name}'
+        signal_seq_name = f'signal_{primer.species}_{primer.primer_type}'
+
         sequences = [
             SequenceInput(
-                f"primer_{primer.name}", primer.sequence, primer_concentration_molar
+                primer_seq_name, primer.sequence, primer_concentration_molar
             ),
             SequenceInput(
-                f"signal_{primer.species}_{primer.primer_type}",
+                signal_seq_name,
                 intended_signal,
                 signal_concentration_molar,
             ),
@@ -1091,7 +1105,7 @@ def test_4_primer_signal_binding_specificity(
 
         # Run NUPACK analysis with base-pairing to get 3'-end binding info
         nupack_results = analyze_sequence_complexes(
-            temperature_celsius=TESTING_CONDITIONS['temperature_C'],
+            temperature_celsius=NASBA_CONDITIONS['target_temp_C'],
             sequences=sequences,
             sodium_millimolar=80.0,  # NASBA conditions
             magnesium_millimolar=12.0,  # NASBA conditions
@@ -1101,56 +1115,40 @@ def test_4_primer_signal_binding_specificity(
 
         # Calculate primer-signal hetero-dimer fraction
         primer_signal_binding = nupack_results.get_hetero_dimer_fraction(
-            seq1_name=f"primer_{primer.name}",
-            seq2_name=f"signal_{primer.species}_{primer.primer_type}",
+            seq1_name=primer_seq_name,
+            seq2_name=signal_seq_name,
             seq1_input_conc_molar=primer_concentration_molar,
             seq2_input_conc_molar=signal_concentration_molar,
         )
 
-        # Calculate 3'-end binding probability
-        three_prime_binding_prob = 0.0
-        primer_length = len(primer.sequence)
-
-        # Find the primer-signal hetero-dimer complex
+        # find the dimer complex
+        dimer_complex = None
         for complex_result in nupack_results.complexes:
-            if (
-                complex_result.size == 2
-                and complex_result.unpaired_probability
-                and f"primer_{primer.name}" in complex_result.sequence_id_map.values()
-                and f"signal_{primer.species}_{primer.primer_type}"
-                in complex_result.sequence_id_map.values()
-            ):
+            complex_strands = complex_result.sequence_id_map.values()
+            if len(complex_strands) != 2:
+                continue
+            if primer_seq_name not in complex_strands:
+                continue
+            if signal_seq_name not in complex_strands:
+                continue
+            dimer_complex = complex_result
+            break
 
-                # Find sequence ID for primer in this complex
-                primer_seq_id = None
-                for seq_id, name in complex_result.sequence_id_map.items():
-                    if name == f"primer_{primer.name}":
-                        primer_seq_id = seq_id
-                        break
+        if not dimer_complex:
+            raise ValueError(f"Could not find dimer complex for {primer.name}")
 
-                if primer_seq_id is not None:
-                    # Get unpaired probability for the last two bases (3'-end)
-                    base1_key = (
-                        primer_seq_id,
-                        primer_length - 1,
-                    )  # Second to last base
-                    base2_key = (primer_seq_id, primer_length)  # Last base
-
-                    # Get unpaired probabilities (lower unpaired = higher paired)
-                    unpaired_prob1 = complex_result.unpaired_probability.get(
-                        base1_key, 1.0
-                    )
-                    unpaired_prob2 = complex_result.unpaired_probability.get(
-                        base2_key, 1.0
-                    )
-
-                    # 3'-end binding probability = 1 - unpaired probability
-                    base1_binding = 1.0 - unpaired_prob1
-                    base2_binding = 1.0 - unpaired_prob2
-
-                    # Both bases should be bound (probability both are bound)
-                    three_prime_binding_prob = base1_binding * base2_binding
-                    break
+        three_prime_binding_prob, three_prime_binding_probs = calculate_weighted_three_prime_end_paired_probabilities(
+            sequence_name=f"primer_{primer.name}",
+            other_sequence_name=f"signal_{primer.species}_{primer.primer_type}",
+            sequence=primer.sequence,
+            other_sequence=intended_signal,
+            sequence_concentration_molar=primer_concentration_molar,
+            other_sequence_concentration_molar=signal_concentration_molar,
+            dimer_concentration=dimer_complex.concentration_molar,
+            dimer_unpaired_probabilities=dimer_complex.unpaired_probability,
+            dimer_id_map=dimer_complex.sequence_id_map,
+            n_bases=3,
+        )
 
         # Check validation criteria
         binding_pass = (
@@ -1167,8 +1165,10 @@ def test_4_primer_signal_binding_specificity(
             primer_name=primer.name,
             target_dais=[f"signal_{primer.species}_{primer.primer_type}"],
             hetero_dimer_fraction=primer_signal_binding,
-            unpaired_3_prime_prob=1.0
-            - three_prime_binding_prob,  # Store as unpaired for consistency
+            unpaired_3_prime_prob=(
+                1.0 - three_prime_binding_prob
+            ),  # Store as unpaired for consistency
+            unpaired_3_prime_probs=tuple(1 - p for p in three_prime_binding_probs),
             passed=overall_pass,
             details=f"Signal binding: {primer_signal_binding:.3f} ({'✓' if binding_pass else '✗'}), "
             f"3'-end binding: {three_prime_binding_prob:.3f} ({'✓' if three_prime_pass else '✗'})",
@@ -1296,83 +1296,22 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
                 f"  Testing against {signal_name} (length: {len(signal_sequence)} bp)"
             )
 
-            # Set up NUPACK analysis
-            primer_concentration_molar = (
-                TESTING_CONDITIONS['primer_concentration_nM'] * 1e-9
-            )
-            signal_concentration_molar = (
-                TESTING_CONDITIONS['signal_concentration_pM'] * 1e-12
-            )
+            primer_seq_name = f'primer_{primer.name}'
 
-            sequences = [
-                SequenceInput(
-                    f"primer_{primer.name}", primer.sequence, primer_concentration_molar
-                ),
-                SequenceInput(signal_name, signal_sequence, signal_concentration_molar),
-            ]
-
-            # Run NUPACK analysis
-            nupack_results = analyze_sequence_complexes(
-                temperature_celsius=TESTING_CONDITIONS['temperature_C'],
-                sequences=sequences,
-                sodium_millimolar=80.0,
-                magnesium_millimolar=12.0,
-                max_complex_size=2,
-                base_pairing_analysis=True,
+            comprehensive_result = analyze_sequence_comprehensive(
+                primary_sequence=primer.sequence,
+                primary_sequence_name=primer_seq_name,
+                primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM'] * 1e-9,
+                other_sequences={ signal_name: signal_sequence},
+                other_sequence_concentrations={ signal_name: TESTING_CONDITIONS['signal_concentration_pM'] * 1e-12 },
+                temp_celsius=NASBA_CONDITIONS['target_temp_C'],
+                n_bases=3,
             )
 
-            # Calculate primer-signal binding (should be low for unintended signals)
-            primer_signal_binding = nupack_results.get_hetero_dimer_fraction(
-                seq1_name=f"primer_{primer.name}",
-                seq2_name=signal_name,
-                seq1_input_conc_molar=primer_concentration_molar,
-                seq2_input_conc_molar=signal_concentration_molar,
-            )
-
-            # Calculate monomer fraction (should be high - primer stays as monomer)
-            monomer_fraction = nupack_results.get_monomer_fraction(
-                sequence_name=f"primer_{primer.name}",
-                sequence_input_conc_molar=primer_concentration_molar,
-            )
-
-            # Calculate 3'-end unpaired probability (should be high - no binding at 3'-end)
-            three_prime_unpaired_prob = 1.0  # Default to unpaired
-            primer_length = len(primer.sequence)
-
-            # Look for any complex containing this primer to get 3'-end info
-            for complex_result in nupack_results.complexes:
-                if (
-                    complex_result.unpaired_probability
-                    and f"primer_{primer.name}"
-                    in complex_result.sequence_id_map.values()
-                ):
-
-                    primer_seq_id = None
-                    for seq_id, name in complex_result.sequence_id_map.items():
-                        if name == f"primer_{primer.name}":
-                            primer_seq_id = seq_id
-                            break
-
-                    if primer_seq_id is not None:
-                        # Get unpaired probability for the last two bases
-                        base1_key = (primer_seq_id, primer_length - 1)
-                        base2_key = (primer_seq_id, primer_length)
-
-                        unpaired_prob1 = complex_result.unpaired_probability.get(
-                            base1_key, 1.0
-                        )
-                        unpaired_prob2 = complex_result.unpaired_probability.get(
-                            base2_key, 1.0
-                        )
-
-                        # Weight by complex concentration and take the maximum unpaired probability
-                        complex_weight = complex_result.concentration_molar
-                        weighted_unpaired = (
-                            unpaired_prob1 * unpaired_prob2
-                        ) * complex_weight
-                        three_prime_unpaired_prob = max(
-                            three_prime_unpaired_prob, weighted_unpaired
-                        )
+            monomer_fraction = comprehensive_result.primary_monomer_fraction
+            primer_signal_binding = comprehensive_result.dimer_fraction[signal_name]
+            unpaired_3_prime_prob = comprehensive_result.weighted_three_prime_unpaired_prob
+            unpaired_3_prime_probs = comprehensive_result.weighted_three_prime_unpaired_probs
 
             # Validation criteria (primers should NOT bind significantly to unintended signals)
             low_binding_pass = primer_signal_binding <= (
@@ -1383,7 +1322,7 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
                 >= VALIDATION_THRESHOLDS['primer_monomer_vs_wrong_daises']
             )  # >90% monomer
             unpaired_pass = (
-                three_prime_unpaired_prob
+                unpaired_3_prime_prob
                 >= VALIDATION_THRESHOLDS['primer_unpaired_3_prime_min']
             )
 
@@ -1395,18 +1334,19 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
                 target_dais=[signal_name],
                 hetero_dimer_fraction=primer_signal_binding,
                 monomer_fraction=monomer_fraction,
-                unpaired_3_prime_prob=three_prime_unpaired_prob,
+                unpaired_3_prime_prob=unpaired_3_prime_prob,
+                unpaired_3_prime_probs=unpaired_3_prime_probs,
                 passed=overall_pass,
                 details=f"{signal_name}: Binding {primer_signal_binding:.3f} ({'✓' if low_binding_pass else '✗'}), "
                 f"Monomer {monomer_fraction:.3f} ({'✓' if monomer_pass else '✗'}), "
-                f"3'-unpaired {three_prime_unpaired_prob:.4f} ({'✓' if unpaired_pass else '✗'})",
+                f"3'-unpaired {unpaired_3_prime_prob:.4f} ({'✓' if unpaired_pass else '✗'})",
             )
             results.append(result)
 
             print(
                 f"    {signal_name:20s}: Binding {primer_signal_binding:.3f} ({'✓' if low_binding_pass else '✗'}), "
                 f"Monomer {monomer_fraction:.3f} ({'✓' if monomer_pass else '✗'}), "
-                f"3'-unpaired {three_prime_unpaired_prob:.4f} ({'✓' if unpaired_pass else '✗'})"
+                f"3'-unpaired {unpaired_3_prime_prob:.4f} ({'✓' if unpaired_pass else '✗'})"
             )
 
     return results
@@ -1725,7 +1665,7 @@ def test_6_inter_pathogen_amplicon_cross_reactivity(
 
                 # Run NUPACK analysis
                 nupack_results = analyze_sequence_complexes(
-                    temperature_celsius=TESTING_CONDITIONS['temperature_C'],
+                    temperature_celsius=NASBA_CONDITIONS['target_temp_C'],
                     sequences=sequences,
                     sodium_millimolar=80.0,
                     magnesium_millimolar=12.0,
@@ -1796,8 +1736,6 @@ def test_7_generic_primer_amplicon_binding_specificity(
 
     Generic forward primer binds to sense amplicon signal.
     Generic reverse primer binds to antisense amplicon signal.
-
-    Uses 25nM primer concentration, 1nM signal concentration.
     """
     results = []
 
@@ -1864,8 +1802,9 @@ def test_7_generic_primer_amplicon_binding_specificity(
         ]
 
         if not ct_amplicons_set or not ng_amplicons_set:
-            print(f"  Warning: Missing amplicons for {generic_set}")
-            continue
+            raise RuntimeError(
+                f'No amplicons found for generic set "{generic_set}"'
+            )
 
         # Test generic forward primer with sense amplicons (both C.T and N.G)
         for amplicon in ct_amplicons_set + ng_amplicons_set:
@@ -1922,60 +1861,23 @@ def _test_generic_primer_binding(
         SequenceInput(signal_name, signal_sequence, signal_concentration_molar),
     ]
 
-    # Run NUPACK analysis with base-pairing to get 3'-end binding info
-    nupack_results = analyze_sequence_complexes(
-        temperature_celsius=TESTING_CONDITIONS['temperature_C'],
-        sequences=sequences,
-        sodium_millimolar=80.0,  # NASBA conditions
-        magnesium_millimolar=12.0,  # NASBA conditions
-        max_complex_size=2,
-        base_pairing_analysis=True,
+    comprehensive_result = analyze_sequence_comprehensive(
+        primary_sequence=primer_sequence,
+        primary_sequence_name=primer_name,
+        primary_sequence_concentration=primer_concentration_molar,
+        other_sequences={
+            signal_name: signal_sequence,
+        },
+        other_sequence_concentrations={
+            signal_name: signal_concentration_molar,
+        },
+        temp_celsius=NASBA_CONDITIONS['target_temp_C'],
+        n_bases=3,
     )
 
-    # Calculate primer-signal hetero-dimer fraction
-    primer_signal_binding = nupack_results.get_hetero_dimer_fraction(
-        seq1_name=primer_name,
-        seq2_name=signal_name,
-        seq1_input_conc_molar=primer_concentration_molar,
-        seq2_input_conc_molar=signal_concentration_molar,
-    )
-
-    # Calculate 3'-end binding probability
-    three_prime_binding_prob = 0.0
-    primer_length = len(primer_sequence)
-
-    # Find the primer-signal hetero-dimer complex
-    for complex_result in nupack_results.complexes:
-        if (
-            complex_result.size == 2
-            and complex_result.unpaired_probability
-            and primer_name in complex_result.sequence_id_map.values()
-            and signal_name in complex_result.sequence_id_map.values()
-        ):
-
-            # Find sequence ID for primer in this complex
-            primer_seq_id = None
-            for seq_id, name in complex_result.sequence_id_map.items():
-                if name == primer_name:
-                    primer_seq_id = seq_id
-                    break
-
-            if primer_seq_id is not None:
-                # Get unpaired probability for the last two bases (3'-end)
-                base1_key = (primer_seq_id, primer_length - 1)  # Second to last base
-                base2_key = (primer_seq_id, primer_length)  # Last base
-
-                # Get unpaired probabilities (lower unpaired = higher paired)
-                unpaired_prob1 = complex_result.unpaired_probability.get(base1_key, 1.0)
-                unpaired_prob2 = complex_result.unpaired_probability.get(base2_key, 1.0)
-
-                # 3'-end binding probability = 1 - unpaired probability
-                base1_binding = 1.0 - unpaired_prob1
-                base2_binding = 1.0 - unpaired_prob2
-
-                # Both bases should be bound (probability both are bound)
-                three_prime_binding_prob = base1_binding * base2_binding
-                break
+    primer_signal_binding = comprehensive_result.dimer_fraction[signal_name]
+    three_prime_binding_prob = comprehensive_result.weighted_dimer_three_prime_paired_prob[signal_name]
+    three_prime_binding_probs = comprehensive_result.weighted_dimer_three_prime_paired_probs[signal_name]
 
     # Check validation criteria
     binding_pass = (
@@ -1993,8 +1895,10 @@ def _test_generic_primer_binding(
         primer_name=primer_name,
         target_dais=[signal_name],
         hetero_dimer_fraction=primer_signal_binding,
-        unpaired_3_prime_prob=1.0
-        - three_prime_binding_prob,  # Store as unpaired for consistency
+        unpaired_3_prime_prob=(
+            1.0 - three_prime_binding_prob
+        ),  # Store as unpaired for consistency
+        unpaired_3_prime_probs=tuple((1.0 - p) for p in three_prime_binding_probs),
         passed=overall_pass,
         details=f"{test_type}: Binding {primer_signal_binding:.3f} ({'✓' if binding_pass else '✗'}), "
         f"3'-end binding {three_prime_binding_prob:.3f} ({'✓' if three_prime_pass else '✗'})",
@@ -2120,7 +2024,7 @@ def _test_generic_primer_cross_reactivity(
 
     # Run NUPACK analysis
     nupack_results = analyze_sequence_complexes(
-        temperature_celsius=TESTING_CONDITIONS['temperature_C'],
+        temperature_celsius=NASBA_CONDITIONS['target_temp_C'],
         sequences=sequences,
         sodium_millimolar=80.0,
         magnesium_millimolar=12.0,
@@ -2301,7 +2205,7 @@ def test_9_generic_primer_cross_reactivity_within_primer_set(
 
         # Run NUPACK analysis with all 6 primers
         nupack_results = analyze_sequence_complexes(
-            temperature_celsius=TESTING_CONDITIONS['temperature_C'],
+            temperature_celsius=NASBA_CONDITIONS['target_temp_C'],
             sequences=sequences,
             sodium_millimolar=80.0,
             magnesium_millimolar=12.0,
@@ -2688,7 +2592,10 @@ def run_comprehensive_validation() -> Dict:
         # To run a partial set, pass e.g. selected = ['test_4', 'test_5']
         # selected: Optional[List[str]] = None
         selected: Optional[List[str]] = [
-            'test_1', 'test_2', 'test_3', 'test_4',
+            'test_5',
+            'test_6',
+            'test_7',
+            'test_8',
         ]
         pair_results = run_selected_tests(ctx, selected_tests=selected)
 
@@ -2822,7 +2729,7 @@ def build_validation_dataframe(all_pairs: Dict) -> pd.DataFrame:
                             'unpaired_3_prime_prob': vr.unpaired_3_prime_prob,
                             'passed': vr.passed,
                             'details': vr.details,
-                            'temperature_C': TESTING_CONDITIONS['temperature_C'],
+                            'temperature_C': NASBA_CONDITIONS['target_temp_C'],
                         }
                     )
 

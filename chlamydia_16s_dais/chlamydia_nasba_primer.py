@@ -53,8 +53,8 @@ class BasePrimer:
 
     name: str
     sequence: str
-    binding_start: int  # 0-based position in canonical template
-    binding_end: int  # 0-based position in canonical template (exclusive)
+    binding_start: int  # 0-based position in the canonical template
+    binding_end: int  # 0-based position in the canonical template (exclusive)
     is_forward: bool  # True for forward, False for reverse
 
     @property
@@ -63,7 +63,7 @@ class BasePrimer:
 
     @property
     def binding_3_prime_pos(self) -> int:
-        """Get the 3'-end position relative to canonical template."""
+        """Get the 3'-end position relative to the canonical template."""
         if self.is_forward:
             # Forward primer: 3'-end is at binding_end - 1
             return self.binding_end - 1
@@ -139,9 +139,9 @@ def get_base_primers() -> Dict[str, Dict[str, BasePrimer]]:
         {
             "id": "TETR",
             "forward_name": "CTR 70",
-            "forward_seq": "GGCG" "A" "TATTTGGGCATCCGAGTAACG",  # modified for canonical
+            "forward_seq": "GGCG" "A" "TATTTGGGCATCCGAGTAACG",  # modified for canonical # noqa: typo
             "reverse_name": "CTR 71",
-            "reverse_seq": "TCAAATCCAGCGGGTATTAACCG" "T" "CT",  # modified for canonical
+            "reverse_seq": "TCAAATCCAGCGGGTATTAACCG" "T" "CT",  # modified for canonical # noqa: typo
         },
         {
             "id": "S11",
@@ -153,23 +153,23 @@ def get_base_primers() -> Dict[str, Dict[str, BasePrimer]]:
         {
             "id": "IMRS",
             "forward_name": "IMRS-F",
-            "forward_seq": "TGCTGC"
+            "forward_seq": "TGCTGC" # noqa: typo
             "A"
             "TG"
             "G"
             "CTG"
-            "TCGTCAGCTCGT"
-            "GCCG",  # modified for canonical
+            "TCGTCAGCTCGT" # noqa: typo
+            "GCCG",  # modified for canonical # noqa: typo
             "reverse_name": "IMRS-R",
             "reverse_seq": "TG"
             "GT"
             "TA"
-            "ACCCAG"
+            "ACCCAG" # noqa: typo
             "GC"
             "AGT"
             "CTC"
             "G"
-            "TTAGAG",  # modified for canonical
+            "TTAGAG",  # modified for canonical # noqa: typo
         },
     ]
 
@@ -314,7 +314,7 @@ def generate_nasba_primer_candidates(
                 )
                 primer_type = 'reverse'
 
-            # Note: Thermodynamic validation will be performed by separate module
+            # Note: Thermodynamic validation will be performed by a separate module
             is_valid = True  # All candidates are initially considered valid
 
             candidate = NASBAPrimerCandidate(

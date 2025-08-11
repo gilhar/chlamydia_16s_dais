@@ -6,7 +6,7 @@ to identify where the difference occurs.
 import numpy as np
 import nupack
 from nupack import SetSpec
-from nasba_primer_thermodynamics import _analyze_sequences_with_nupack
+from nasba_primer_thermodynamics import _analyze_sequences_with_nupack, NASBA_CONDITIONS
 
 
 def direct_nupack_call():
@@ -23,7 +23,12 @@ def direct_nupack_call():
     strand2 = nupack.Strand(seq2, name='strand2', material='dna')
 
     # Create thermodynamic model
-    model = nupack.Model(material='dna', celsius=41.0, sodium=0.08, magnesium=0.012)
+    model = nupack.Model(
+        material='dna',
+        celsius=NASBA_CONDITIONS['target_temp_C'],
+        sodium=NASBA_CONDITIONS['Na_mM'] / 1e3,
+        magnesium=NASBA_CONDITIONS['Mg_mM'] / 1e3
+    )
 
     # Create tube
     tube = nupack.Tube(
@@ -59,9 +64,9 @@ def internal_api_call():
             sequences=["ATCG", "CGAT"],
             sequence_names=['strand1', 'strand2'],
             concentrations_molar=[250e-9, 250e-9],
-            temp_celsius=41.0,
-            sodium_molar=0.08,
-            magnesium_molar=0.012,
+            temp_celsius=NASBA_CONDITIONS['target_temp_C'],
+            sodium_molar=NASBA_CONDITIONS['Na_mM'] / 1e3,
+            magnesium_molar=NASBA_CONDITIONS['Mg_mM'] / 1e3,
             max_complex_size=2,
             include_base_pairing=True,
         )
@@ -107,7 +112,12 @@ def debug_internal_api():
         print(f"Created strand {i}: {strand}")
 
     # Create model (same as internal function)
-    model = nupack.Model(material='dna', celsius=41.0, sodium=0.08, magnesium=0.012)
+    model = nupack.Model(
+        material='dna',
+        celsius=NASBA_CONDITIONS['target_temp_C'],
+        sodium=NASBA_CONDITIONS['Na_mM'] / 1e3,
+        magnesium=NASBA_CONDITIONS['Mg_mM'] / 1e3
+    )
     print(f"Created model: {model}")
 
     # Create tube (same as internal function)

@@ -17,6 +17,7 @@ Date: 2025
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
 import nupack
+from Bio.PDB.ic_data import primary_angles
 from nupack import SetSpec
 
 # ============================================================================
@@ -33,8 +34,9 @@ NASBA_PRIMER_CONCENTRATION_MOLAR = 250e-9  # 250nM primer concentration
 NASBA_CONDITIONS = {
     'Na_mM': NASBA_SODIUM_MOLAR * 1000,  # Convert back to mM for display
     'Mg_mM': NASBA_MAGNESIUM_MOLAR * 1000,  # Convert back to mM for display
-    'primer_uM': NASBA_PRIMER_CONCENTRATION_MOLAR
-    * 1e6,  # Convert back to µM for display
+    'primer_uM': (
+        NASBA_PRIMER_CONCENTRATION_MOLAR * 1e6
+    ),  # Convert back to µM for display
     'target_temp_C': NASBA_TEMPERATURE_CELSIUS,
 }
 
@@ -53,7 +55,8 @@ class AssayConcentrations:
     """Concentrations for different types of binding assays."""
 
     primer_dais_binding: Dict[str, float] = None
-    cross_reactivity: Dict[str, float] = None
+    primer_primer_cross_reactivity: Dict[str, float] = None
+    primer_non_signal_cross_reactivity: Dict[str, float] = None
     off_target_dais: Dict[str, float] = None
     amplicon_strand_binding: Dict[str, float] = None
     generic_primer_amplicon: Dict[str, float] = None
@@ -65,8 +68,13 @@ class AssayConcentrations:
                 'target_dais_concentration_M': 250e-9,  # 250nM target dais
             }
 
-        if self.cross_reactivity is None:
-            self.cross_reactivity = {
+        if self.primer_primer_cross_reactivity is None:
+            self.primer_primer_cross_reactivity = {
+                'primer_concentration_M': 250e-9,  # 250nM primer
+                'other_primer_concentration_M': 250e-9,
+            }
+        if self.primer_non_signal_cross_reactivity is None:
+            self.primer_non_signal_cross_reactivity = {
                 'primer_concentration_M': 250e-9,  # 250nM primer
                 'other_sequence_concentration_M': 10e-12,  # 10pM other sequences
             }
@@ -239,7 +247,7 @@ def _analyze_sequences_with_nupack(
                         "This indicates a problem with the NUPACK analysis."
                     )
 
-                # Get the pairs probability matrix for this complex
+                # Get the pair probability matrix for this complex
                 pairs_matrix = complex_result.pairs.to_array()
 
                 # Initialize dictionaries for this complex
@@ -265,7 +273,7 @@ def _analyze_sequences_with_nupack(
                         # Unpaired probability is on the diagonal
                         unpaired_prob = pairs_matrix[matrix_idx, matrix_idx]
 
-                        # Validate unpaired probability is in valid range
+                        # Validate unpaired probability is in the valid range
                         if not (0.0 <= unpaired_prob <= 1.0):
                             raise ValueError(
                                 f"Unpaired probability {unpaired_prob} for base ({strand_idx}, {base_idx}) "
@@ -466,7 +474,7 @@ def extract_heterodimer_concentration(
     # Create the expected hetero-dimer complex
     heterodimer_complex = nupack.Complex([strand1, strand2])
 
-    # Look for this complex in the concentrations dict
+    # Look for this complex in the concentration dict
     heterodimer_concentration = None
 
     for complex_obj, concentration in complex_concentrations.items():
@@ -488,6 +496,173 @@ def extract_heterodimer_concentration(
     return heterodimer_concentration
 
 
+# calculate the pairing probabilities of the last n_bases of the sequence,
+#  when in a tube with other sequences, where the complex concentrations and
+#  pairing probabilities were already computed and are provided in
+#  complex_concentrations and pairing_probabilities
+#
+#  sequence_name: Name of the sequence
+#  other_sequence_name: Name of the other sequence
+#  sequence: Sequence
+#  other_sequence: Sequence
+#  sequence_concentration_molar: Concentration of the sequence in M
+#  other_sequence_concentration_molar: Concentration of the other sequence in M
+#  complex_concentrations: Dict from NUPACK analysis results
+#  other_sequence_name: Name of the other sequence
+#  n_bases: Number of 3'-end bases to analyze
+#
+# We take the probabilities of the last n_bases of the sequence, and weigh
+#  by the concentration of the dimer relative to the limiting concentration
+#  ( min(sequence_concentration_molar, other_sequence_concentration_molar) )
+# We use (1-unpaired_prob) as the assumption here is that we do not
+#   really care (or know, or care enough to know) where precisely the 3'-end of
+#   sequence should bind to other_sequence, so we use the aggregate
+def calculate_weighted_three_prime_end_paired_probabilities(
+    sequence_name: str,
+    other_sequence_name: str,
+    sequence: str,
+    other_sequence: str,
+    sequence_concentration_molar: float,
+    other_sequence_concentration_molar: float,
+    dimer_concentration: float,
+    dimer_unpaired_probabilities: Dict[tuple[int, int], float],
+    dimer_id_map: dict[int, str],
+    n_bases: int = 3,
+) -> tuple[float, tuple[float, ...]]:
+    # Calculate weighted unpaired probability
+    weighted_unpaired_probs = []  # One value per base position
+
+    limiting_sequence_concentration_molar = min(
+        sequence_concentration_molar, other_sequence_concentration_molar
+    )
+    contribution_to_primer_conc = dimer_concentration
+    if sequence == other_sequence:
+        contribution_to_primer_conc *= 2
+
+    # Weight by the fraction of primer that's in this complex
+    weight = (
+        contribution_to_primer_conc / limiting_sequence_concentration_molar
+    )
+
+    if len(dimer_id_map) != 2 or sequence_name not in dimer_id_map or other_sequence_name not in dimer_id_map:
+        raise ValueError(
+            f"Invalid dimer_id_map: {dimer_id_map} for sequence {sequence_name} and other sequence {other_sequence_name}"
+        )
+
+    sequence_strand_idx = 0 if sequence_name == dimer_id_map[0] else 1
+    other_sequence_strand_idx = 0 if other_sequence_name == dimer_id_map[1] else 1
+    if dimer_id_map[sequence_strand_idx] != sequence_name or dimer_id_map[other_sequence_strand_idx] != other_sequence_name:
+        raise ValueError(
+            f"Strand indices do not match names: {dimer_id_map} for sequence {sequence_name} and other sequence {other_sequence_name}"
+        )
+    for base_offset in range(n_bases):
+        base_idx = len(sequence) - 1 - base_offset  # Count from 3'-end
+
+        # Get unpaired probability for this base in this complex
+        unpaired_prob_in_complex = dimer_unpaired_probabilities.get(
+            (sequence_strand_idx, base_idx)
+        )
+
+        if unpaired_prob_in_complex is None:
+            raise ValueError(
+                f"Missing unpaired probability for primer base {base_idx} "
+                f"(offset {base_offset}) in dimer <{dimer_id_map[0]},{dimer_id_map[1]}>"
+            )
+        weighted_prob_for_base = unpaired_prob_in_complex * weight
+
+        if weighted_prob_for_base is None:
+            raise ValueError(
+                f"Missing unpaired probability for primer base {base_idx} "
+                f"(offset {base_offset})"
+            )
+        weighted_unpaired_probs.append(weighted_prob_for_base)
+
+    # Average weighted probability across the n_bases
+    weighted_unpaired_prob = sum(weighted_unpaired_probs) / len(weighted_unpaired_probs)
+
+    return 1 - weighted_unpaired_prob, tuple(1 - p for p in weighted_unpaired_probs)
+
+
+# compute the weighted three prime end unpaired probabilities of the last
+#  n_bases of the sequence, when in a tube with other sequences, where the complex
+#  concentrations and unpairing probabilities were already computed and
+#  are provided in complex_concentrations and unpaired_probabilities
+#
+#  sequence_name: Name of the sequence
+#  sequence: Sequence
+#  sequence_concentration_molar: Concentration of the sequence in M
+#  complex_concentrations: Dict from NUPACK analysis results
+#  unpaired_probabilities: Dict from NUPACK analysis results
+#  strand_id_map: Dict from NUPACK analysis results, mapping strand_id to strand name
+#  n_bases: Number of 3'-end bases to analyze
+#
+# The unpaired probabilities in each complex which includes the given sequence-name
+#  are summed, weighted by the concentration of the complex
+def calculate_weighted_three_prime_end_unpaired_probabilities(
+    sequence_name: str,
+    sequence: str,
+    sequence_concentration_molar: float,
+    complex_concentrations: Dict[nupack.Complex, float],
+    unpaired_probabilities: Dict[nupack.Complex, Dict[Tuple[int, int], float]],
+    strand_id_map: Dict[nupack.Complex, Dict[int, str]],
+    n_bases: int = 3,
+) -> tuple[float, tuple[float, ...]]:
+    # Calculate weighted unpaired probability
+    weighted_unpaired_probs = []  # One value per base position
+
+    for base_offset in range(n_bases):
+        base_idx = len(sequence) - 1 - base_offset  # Count from 3'-end
+        weighted_prob_for_base = 0.0
+
+        # Sum over all complexes containing this primer
+        for (
+            complex_obj,
+            complex_unpaired_probs,
+        ) in unpaired_probabilities.items():
+            complex_strand_map = strand_id_map[complex_obj]
+
+            # Find this primer in the complex
+            sequence_strand_idx = None
+            assert complex_strand_map is not None
+            for strand_idx, strand_name in complex_strand_map.items():
+                if strand_name == sequence_name:
+                    sequence_strand_idx = strand_idx
+                    break
+
+            if sequence_strand_idx is not None:
+                # This sequence is in this complex
+                complex_concentration = complex_concentrations[complex_obj]
+
+                # Calculate how much of this primer's concentration is in this complex
+                primer_strands_in_complex = sum(
+                    1 for name in complex_strand_map.values() if name == sequence_name
+                )
+                contribution_to_primer_conc = (
+                    complex_concentration * primer_strands_in_complex
+                )
+
+                # Get unpaired probability for this base in this complex
+                unpaired_prob_in_complex = complex_unpaired_probs.get(
+                    (sequence_strand_idx, base_idx)
+                )
+
+                if unpaired_prob_in_complex is None:
+                    raise ValueError(
+                        f"Missing unpaired probability for primer base {base_idx} "
+                        f"(offset {base_offset}) in complex {complex_obj}"
+                    )
+                # Weight by the fraction of primer that's in this complex
+                weight = contribution_to_primer_conc / sequence_concentration_molar
+                weighted_prob_for_base += unpaired_prob_in_complex * weight
+
+        weighted_unpaired_probs.append(weighted_prob_for_base)
+
+    # Average weighted probability across the n_bases
+    weighted_unpaired_prob = sum(weighted_unpaired_probs) / len(weighted_unpaired_probs)
+
+    return weighted_unpaired_prob, tuple(weighted_unpaired_probs)
+
+
 def analyze_multi_primer_solution(
     primer_sequences: List[str],
     primer_names: List[str],
@@ -496,7 +671,7 @@ def analyze_multi_primer_solution(
     temp_celsius: float = NASBA_TEMPERATURE_CELSIUS,
     sodium_molar: float = NASBA_SODIUM_MOLAR,
     magnesium_molar: float = NASBA_MAGNESIUM_MOLAR,
-) -> Dict[str, Dict[str, float]]:
+) -> Dict[str, Dict[str, float | tuple[float, ...]]]:
     """
     Efficiently analyze all primers in a multi-primer solution with a single NUPACK run.
 
@@ -556,59 +731,16 @@ def analyze_multi_primer_solution(
     for i, (primer_seq, primer_name, primer_conc) in enumerate(
         zip(primer_sequences, primer_names, primer_concentrations)
     ):
-        # Calculate weighted unpaired probability from the existing result
-        weighted_unpaired_probs = []  # One value per base position
-
-        for base_offset in range(n_bases):
-            base_idx = len(primer_seq) - 1 - base_offset  # Count from 3'-end
-            weighted_prob_for_base = 0.0
-
-            # Sum over all complexes containing this primer
-            for (
-                complex_obj,
-                complex_unpaired_probs,
-            ) in result.unpaired_probabilities.items():
-                complex_strand_map = result.strand_id_map[complex_obj]
-
-                # Find this primer in the complex
-                primer_strand_idx = None
-                assert complex_strand_map is not None
-                for strand_idx, strand_name in complex_strand_map.items():
-                    if strand_name == primer_name:
-                        primer_strand_idx = strand_idx
-                        break
-
-                if primer_strand_idx is not None:
-                    # This primer is in this complex
-                    complex_concentration = result.complex_concentrations[complex_obj]
-
-                    # Calculate how much of this primer's concentration is in this complex
-                    primer_strands_in_complex = sum(
-                        1 for name in complex_strand_map.values() if name == primer_name
-                    )
-                    contribution_to_primer_conc = (
-                        complex_concentration * primer_strands_in_complex
-                    )
-
-                    # Get unpaired probability for this base in this complex
-                    unpaired_prob_in_complex = complex_unpaired_probs.get(
-                        (primer_strand_idx, base_idx)
-                    )
-
-                    if unpaired_prob_in_complex is None:
-                        raise ValueError(
-                            f"Missing unpaired probability for primer base {base_idx} "
-                            f"(offset {base_offset}) in complex {complex_obj}"
-                        )
-                    # Weight by the fraction of primer that's in this complex
-                    weight = contribution_to_primer_conc / primer_conc
-                    weighted_prob_for_base += unpaired_prob_in_complex * weight
-
-            weighted_unpaired_probs.append(weighted_prob_for_base)
-
-        # Average weighted probability across the n_bases
-        weighted_unpaired_prob = sum(weighted_unpaired_probs) / len(
-            weighted_unpaired_probs
+        weighted_unpaired_prob, weighted_unpaired_probs = (
+            calculate_weighted_three_prime_end_unpaired_probabilities(
+                sequence_name=primer_name,
+                sequence=primer_seq,
+                sequence_concentration_molar=primer_conc,
+                complex_concentrations=result.complex_concentrations,
+                unpaired_probabilities=result.unpaired_probabilities,
+                strand_id_map=result.strand_id_map,
+                n_bases=n_bases,
+            )
         )
 
         # Calculate monomer fraction
@@ -644,7 +776,6 @@ def analyze_multi_primer_solution(
             "monomer_fraction": monomer_fraction,
             "weighted_unpaired_prob": weighted_unpaired_prob,
             "weighted_unpaired_probs": weighted_unpaired_probs,
-            "weighted_unpaired_probs": weighted_unpaired_probs,
         }
 
         # Check total concentration conservation
@@ -659,287 +790,6 @@ def analyze_multi_primer_solution(
             )
 
     return primer_results
-
-
-def calculate_3_prime_unpaired_probability_weighted(
-    target_sequence: str,
-    target_name: str,
-    all_sequences: List[str],
-    all_names: List[str],
-    all_concentrations: List[float],
-    n_bases: int = 3,  # changed from 2 to 3
-    temp_celsius: float = NASBA_TEMPERATURE_CELSIUS,
-    sodium_molar: float = NASBA_SODIUM_MOLAR,
-    magnesium_molar: float = NASBA_MAGNESIUM_MOLAR,
-) -> List[float]:
-    """
-    Calculate the concentration-weighted probability that the last n_bases at the 3'-end
-    of a target sequence remain unpaired in a multi-strand solution.
-
-    Returns:
-        List of weighted unpaired probabilities for the last n_bases (3'→5'):
-        [p_last_base, p_second_last_base, p_third_last_base, ...]
-    """
-    # Validate inputs
-    if not target_sequence or not target_name:
-        raise ValueError("target_sequence and target_name cannot be empty")
-
-    if not all_sequences or not all_names or not all_concentrations:
-        raise ValueError(
-            "all_sequences, all_names, and all_concentrations cannot be empty"
-        )
-
-    if len(all_sequences) != len(all_names) != len(all_concentrations):
-        raise ValueError(
-            f"Length mismatch: sequences={len(all_sequences)}, names={len(all_names)}, concentrations={len(all_concentrations)}"
-        )
-
-    if n_bases <= 0 or n_bases > len(target_sequence):
-        raise ValueError(
-            f"n_bases ({n_bases}) must be between 1 and target sequence length ({len(target_sequence)})"
-        )
-
-    # Find target sequence in the list
-    target_index = None
-    for i, name in enumerate(all_names):
-        if name == target_name:
-            target_index = i
-            break
-
-    if target_index is None:
-        raise ValueError(
-            f"Target sequence '{target_name}' not found in all_names: {all_names}"
-        )
-
-    if all_sequences[target_index] != target_sequence:
-        raise ValueError(
-            f"Target sequence mismatch: provided='{target_sequence}', found='{all_sequences[target_index]}'"
-        )
-
-    # Perform multi-strand NUPACK analysis
-    result = _analyze_sequences_with_nupack(
-        sequences=all_sequences,
-        sequence_names=all_names,
-        concentrations_molar=all_concentrations,
-        temp_celsius=temp_celsius,
-        sodium_molar=sodium_molar,
-        magnesium_molar=magnesium_molar,
-        max_complex_size=2,
-        include_base_pairing=True,
-    )
-
-    if not result.unpaired_probabilities or not result.strand_id_map:
-        raise ValueError("NUPACK analysis failed to return base-pairing data")
-
-    # Calculate concentration-weighted unpaired probability per-base (3'-end outward)
-    weighted_unpaired_probs: List[float] = []
-
-    for base_offset in range(n_bases):
-        base_idx = len(target_sequence) - 1 - base_offset
-        weighted_prob_for_base = 0.0
-        total_target_concentration_check = 0.0
-
-        for (
-            complex_obj,
-            complex_unpaired_probs,
-        ) in result.unpaired_probabilities.items():
-            complex_strand_map = result.strand_id_map[complex_obj]
-
-            target_strand_idx = None
-            for strand_idx, strand_name in complex_strand_map.items():
-                if strand_name == target_name:
-                    target_strand_idx = strand_idx
-                    break
-
-            if target_strand_idx is not None:
-                complex_concentration = result.complex_concentrations[complex_obj]
-                target_strands_in_complex = sum(
-                    1 for name in complex_strand_map.values() if name == target_name
-                )
-                contribution_to_target_conc = (
-                    complex_concentration * target_strands_in_complex
-                )
-                total_target_concentration_check += contribution_to_target_conc
-
-                unpaired_prob_in_complex = complex_unpaired_probs.get(
-                    (target_strand_idx, base_idx)
-                )
-                if unpaired_prob_in_complex is None:
-                    raise ValueError(
-                        f"Missing unpaired probability for target base {base_idx} "
-                        f"(offset {base_offset}) in complex {complex_obj}"
-                    )
-
-                weight = (
-                    contribution_to_target_conc
-                    / all_concentrations[
-                        [i for i, n in enumerate(all_names) if n == target_name][0]
-                    ]
-                )
-                weighted_prob_for_base += unpaired_prob_in_complex * weight
-
-        # Validate conservation within tolerance
-        target_concentration = all_concentrations[
-            [i for i, n in enumerate(all_names) if n == target_name][0]
-        ]
-        concentration_error = (
-            abs(total_target_concentration_check - target_concentration)
-            / target_concentration
-        )
-        if concentration_error > 0.01:
-            raise ValueError(
-                f"Concentration conservation failed for {target_name}: "
-                f"expected={target_concentration:.2e}, "
-                f"found={total_target_concentration_check:.2e}, "
-                f"error={concentration_error:.1%} > 1%"
-            )
-
-        weighted_unpaired_probs.append(weighted_prob_for_base)
-
-    # Return per-base list (no averaging)
-    return weighted_unpaired_probs
-
-
-def calculate_3_prime_unpaired_probability_nupack(
-    primer_sequence: str,
-    competing_sequences: List[str],
-        n_bases: int = 3,
-    primer_concentration_molar: float = NASBA_PRIMER_CONCENTRATION_MOLAR,
-    competing_concentration_molar: float = NASBA_PRIMER_CONCENTRATION_MOLAR,
-    temp_celsius: float = NASBA_TEMPERATURE_CELSIUS,
-    sodium_molar: float = NASBA_SODIUM_MOLAR,
-    magnesium_molar: float = NASBA_MAGNESIUM_MOLAR,
-) -> List[float]:
-    """
-    Calculate unpaired probabilities for the last n bases at the 3'-end of a primer
-    in the presence of competing sequences using NUPACK.
-
-    Args:
-        primer_sequence: Primer sequence (DNA)
-        competing_sequences: List of competing sequences that might pair with primer
-        n_bases: Number of 3'-end bases to analyze (default: 2)
-        primer_concentration_molar: Primer concentration in M
-        competing_concentration_molar: Competing sequence concentration in M
-        temp_celsius: Temperature in Celsius
-        sodium_molar: Sodium concentration in M
-        magnesium_molar: Magnesium concentration in M
-
-    Returns:
-        List of unpaired probabilities for the last n_bases (3'-end to 5' direction) # noqa #  pylint: disable=all
-        [prob_last_base, prob_second_last_base, ...]
-    """
-    # Validate inputs
-    if not primer_sequence:
-        raise ValueError("primer_sequence cannot be empty")
-
-    if not competing_sequences:
-        raise ValueError("competing_sequences cannot be empty")
-
-    if n_bases <= 0 or n_bases > len(primer_sequence):
-        raise ValueError(
-            f"n_bases ({n_bases}) must be between 1 and sequence length ({len(primer_sequence)})"
-        )
-
-    if primer_concentration_molar <= 0 or competing_concentration_molar <= 0:
-        raise ValueError(
-            f"Concentrations must be positive: primer={primer_concentration_molar}, competing={competing_concentration_molar}"
-        )
-
-    if temp_celsius < -273.15:
-        raise ValueError(f"Temperature {temp_celsius}°C is below absolute zero")
-
-    if sodium_molar < 0 or magnesium_molar < 0:
-        raise ValueError(
-            f"Salt concentrations must be non-negative: Na={sodium_molar}, Mg={magnesium_molar}"
-        )
-
-    for i, seq in enumerate(competing_sequences):
-        if not seq:
-            raise ValueError(f"Competing sequence {i} is empty")
-
-    # For each competing sequence, calculate unpaired probabilities
-    all_unpaired_probs = []
-
-    for i, competing_seq in enumerate(competing_sequences):
-        # Use internal analysis function with base-pairing analysis
-        result = _analyze_sequences_with_nupack(
-            sequences=[primer_sequence, competing_seq],
-            sequence_names=['primer', f'competing_{i}'],
-            concentrations_molar=[
-                primer_concentration_molar,
-                competing_concentration_molar,
-            ],
-            temp_celsius=temp_celsius,
-            sodium_molar=sodium_molar,
-            magnesium_molar=magnesium_molar,
-            max_complex_size=2,
-            include_base_pairing=True,
-        )
-
-        if result.unpaired_probabilities:
-            # Find the dimer complex for this primer-competing pair
-            import nupack
-
-            primer_strand = nupack.Strand(
-                primer_sequence, name='primer', material='dna'
-            )
-            competing_strand = nupack.Strand(
-                competing_seq, name=f'competing_{i}', material='dna'
-            )
-            dimer_complex = nupack.Complex([primer_strand, competing_strand])
-
-            # Get unpaired probabilities for this specific complex
-            complex_unpaired_probs = result.unpaired_probabilities.get(dimer_complex)
-
-            if complex_unpaired_probs is None:
-                available_complexes = list(result.unpaired_probabilities.keys())
-                raise ValueError(
-                    f"Dimer complex {dimer_complex} not found in unpaired probabilities. "
-                    f"Available complexes: {available_complexes}"
-                )
-
-            # Use strand_id_map to find the correct strand index for the primer
-            primer_strand_idx = find_strand_index_by_name(
-                result.strand_id_map, dimer_complex, 'primer'
-            )
-
-            # Extract unpaired probabilities for the last n_bases of primer
-            primer_length = len(primer_sequence)
-            unpaired_probs = []
-
-            for base_offset in range(n_bases):
-                base_idx = primer_length - 1 - base_offset  # Count from 3'-end
-                prob = complex_unpaired_probs.get((primer_strand_idx, base_idx))
-
-                if prob is None:
-                    raise ValueError(
-                        f"Missing unpaired probability for primer base {base_idx} "
-                        f"(offset {base_offset} from 3'-end) at strand index {primer_strand_idx} in complex {dimer_complex}"
-                    )
-
-                if not (0.0 <= prob <= 1.0):
-                    raise ValueError(
-                        f"Unpaired probability {prob} for base {base_idx} is outside valid range [0, 1]"
-                    )
-
-                unpaired_probs.append(prob)
-
-            all_unpaired_probs.append(unpaired_probs)
-
-    if not all_unpaired_probs:
-        raise ValueError(
-            "No unpaired probabilities calculated. This indicates a problem with NUPACK analysis."
-        )
-
-    # Average unpaired probabilities across all competing sequences
-    n_competing = len(all_unpaired_probs)
-    averaged_probs = []
-
-    for base_offset in range(n_bases):
-        avg_prob = sum(probs[base_offset] for probs in all_unpaired_probs) / n_competing
-        averaged_probs.append(avg_prob)
-
-    return averaged_probs
 
 
 def calculate_bound_fraction_nupack(
@@ -1203,10 +1053,7 @@ def find_strand_index_by_name(
 
 
 def calculate_monomer_fractions(
-    sequence1: str,
-    sequence2: str,
-    temp_celsius: float,
-    assay_type: str
+    sequence1: str, sequence2: str, temp_celsius: float, assay_type: str
 ) -> Tuple[float, float]:
     """
     Calculate monomer fractions for two sequences.
@@ -1229,7 +1076,7 @@ def calculate_monomer_fractions(
         seq1_conc = conc_dict['primer_concentration_M']
         seq2_conc = conc_dict['target_dais_concentration_M']
     elif assay_type == "cross_reactivity":
-        conc_dict = concentrations.cross_reactivity
+        conc_dict = concentrations.primer_non_signal_cross_reactivity
         seq1_conc = conc_dict['primer_concentration_M']
         seq2_conc = conc_dict['other_sequence_concentration_M']
     elif assay_type == "off_target_dais":
@@ -1253,7 +1100,7 @@ def calculate_monomer_fractions(
         sequence_names=["seq1", "seq2"],
         concentrations_molar=[seq1_conc, seq2_conc],
         temp_celsius=temp_celsius,
-        max_complex_size=2
+        max_complex_size=2,
     )
 
     # Find monomer concentrations
@@ -1280,45 +1127,33 @@ def calculate_monomer_fractions(
 
     return seq1_fraction, seq2_fraction
 
+# define a dataclass to hold the results of the calculation
+@dataclass
+class ComprehensiveAnalysisResult:
+    """Results of NASBA calculation for a primer candidate."""
+    primary_monomer_fraction: float
+    dimer_fraction: dict[str, float] # sequence name to primer+sequence fraction
+    weighted_three_prime_unpaired_prob: float # primer 3'-end average unpaired probability
+    weighted_three_prime_unpaired_probs: tuple[float, ...] # primer 3'-end unpaired probabilities
+    weighted_dimer_three_prime_paired_prob: dict[str, float] # average probability of
+    weighted_dimer_three_prime_paired_probs: dict[str, tuple[float, ...]]
 
-def calculate_primer_analysis_comprehensive(
-    primer_sequence: str,
-    competing_sequences: List[str],
+
+def analyze_sequence_comprehensive(
+    primary_sequence: str,
+    primary_sequence_name: str,
+    primary_sequence_concentration: float,
+    other_sequences: dict[str, str], # from sequence name to sequence
+    other_sequence_concentrations: dict[str, float],
     temp_celsius: float,
-    assay_type: str,
-    n_bases: int = 2
-) -> Tuple[float, float]:
-    """
-    Calculate both monomer fraction and 3'-end unpaired probability for a primer
-    in the presence of competing sequences using a single NUPACK analysis.
-
-    Args:
-        primer_sequence: Primer sequence to analyze
-        competing_sequences: List of competing sequences (e.g., non-target DAIS)
-        temp_celsius: Temperature in Celsius
-        assay_type: Type of assay (determines concentrations)
-        n_bases: Number of 3'-end bases to analyze for unpaired probability
-
-    Returns:
-        Tuple of (monomer_fraction, weighted_unpaired_prob)
-    """
-    if not competing_sequences:
-        raise ValueError("No competing sequences provided")
-
-    # Get concentrations for assay type
-    concentrations = DEFAULT_ASSAY_CONCENTRATIONS
-
-    if assay_type == "off_target_dais":
-        conc_dict = concentrations.off_target_dais
-        primer_conc = conc_dict['primer_concentration_M']
-        competing_conc = conc_dict['non_intended_dais_concentration_M']
-    else:
-        raise ValueError(f"Unsupported assay type for comprehensive analysis: {assay_type}")
+    n_bases: int = 3,
+) -> ComprehensiveAnalysisResult:
 
     # Create lists for multi-strand analysis
-    all_sequences = [primer_sequence] + competing_sequences
-    all_names = ['target_primer'] + [f'competing_{i}' for i in range(len(competing_sequences))]
-    all_concentrations = [primer_conc] + [competing_conc] * len(competing_sequences)
+    all_sequences = [primary_sequence] + list(other_sequences.values())
+    all_names = [f'seq_{i}_{name}' for i, name in enumerate([primary_sequence_name] + list(other_sequences.keys()))]
+    primary_seq_name = all_names[0]
+    all_concentrations = [primary_sequence_concentration] + list(other_sequence_concentrations)
 
     # Perform single NUPACK analysis
     result = _analyze_sequences_with_nupack(
@@ -1327,65 +1162,78 @@ def calculate_primer_analysis_comprehensive(
         concentrations_molar=all_concentrations,
         temp_celsius=temp_celsius,
         max_complex_size=2,
-        include_base_pairing=True
+        include_base_pairing=True,
     )
 
-    # Calculate monomer fraction for the primer
-    primer_monomer_concentration = 0.0
+    # Calculate the monomer fraction for the primer
+    primary_monomer_concentration = 0.0
 
     for complex_obj, complex_conc in result.complex_concentrations.items():
         complex_strand_map = result.strand_id_map[complex_obj]
 
         # Check if this is a monomer complex containing only our primer
-        if (len(complex_strand_map) == 1 and
-            'target_primer' in complex_strand_map.values()):
-            primer_monomer_concentration = complex_conc
+        if (
+            len(complex_strand_map) == 1
+            and primary_seq_name in complex_strand_map.values()
+        ):
+            primary_monomer_concentration = complex_conc
             break
 
-    monomer_fraction = primer_monomer_concentration / primer_conc if primer_conc > 0 else 0.0
+    monomer_fraction = (
+        primary_monomer_concentration / primary_sequence_concentration if primary_sequence_concentration > 0 else 0.0
+    )
 
-    # Calculate weighted unpaired probability for 3'-end bases
-    weighted_unpaired_probs = []
+    weighted_unpaired_prob, weighted_unpaired_probs = (
+        calculate_weighted_three_prime_end_unpaired_probabilities(
+            sequence_name=primary_seq_name,
+            sequence=primary_sequence,
+            sequence_concentration_molar=primary_sequence_concentration,
+            complex_concentrations=result.complex_concentrations,
+            unpaired_probabilities=result.unpaired_probabilities,
+            strand_id_map=result.strand_id_map,
+            n_bases=n_bases,
+        )
+    )
 
-    for base_offset in range(n_bases):
-        base_idx = len(primer_sequence) - 1 - base_offset  # Count from 3'-end
-        weighted_prob_for_base = 0.0
-
-        # Sum over all complexes containing the primer
-        for complex_obj, complex_unpaired_probs in result.unpaired_probabilities.items():
+    dimer_fraction_dict = {}
+    weighted_dimer_three_prime_paired_prob = {}
+    weighted_dimer_three_prime_paired_probs = {}
+    for i, (other_sequence_name, other_seq) in enumerate(other_sequences.items()):
+        other_seq_name = f'seq_{i+1}_{other_sequence_name}'
+        for complex_obj, complex_conc in result.complex_concentrations.items():
             complex_strand_map = result.strand_id_map[complex_obj]
-
-            # Find the primer in this complex
-            primer_strand_idx = None
-            for strand_idx, strand_name in complex_strand_map.items():
-                if strand_name == 'target_primer':
-                    primer_strand_idx = strand_idx
-                    break
-
-            if primer_strand_idx is not None:
-                # Calculate contribution from this complex
-                complex_concentration = result.complex_concentrations[complex_obj]
-                primer_strands_in_complex = sum(
-                    1 for name in complex_strand_map.values() if name == 'target_primer'
+            if (len(complex_strand_map) != 2
+                    or primary_seq_name not in complex_strand_map.values()
+                    or other_seq_name not in complex_strand_map.values()
+            ):
+                continue
+            # This is a dimer complex containing our primer and the other sequence
+            dimer_fraction_dict[other_sequence_name] = (
+                complex_conc / min(primary_sequence_concentration, other_sequence_concentrations[other_seq_name])
+            )
+            weighted_dimer_three_prime_paired_prob[other_sequence_name], weighted_dimer_three_prime_paired_probs[other_sequence_name] = (
+                calculate_weighted_three_prime_end_paired_probabilities(
+                    sequence_name=primary_seq_name,
+                    other_sequence_name=other_seq_name,
+                    sequence=primary_sequence,
+                    other_sequence=other_sequences[other_sequence_name],
+                    sequence_concentration_molar=primary_sequence_concentration,
+                    other_sequence_concentration_molar=other_sequence_concentrations[other_sequence_name],
+                    dimer_concentration=complex_conc,
+                    dimer_unpaired_probabilities=result.unpaired_probabilities[complex_obj],
+                    dimer_id_map=complex_strand_map,
+                    n_bases=n_bases,
                 )
-                contribution_to_primer_conc = complex_concentration * primer_strands_in_complex
+            )
 
-                # Get unpaired probability for this base in this complex
-                unpaired_prob_in_complex = complex_unpaired_probs.get(
-                    (primer_strand_idx, base_idx)
-                )
-
-                if unpaired_prob_in_complex is not None:
-                    # Weight by the fraction of primer that's in this complex
-                    weight = contribution_to_primer_conc / primer_conc
-                    weighted_prob_for_base += unpaired_prob_in_complex * weight
-
-        weighted_unpaired_probs.append(weighted_prob_for_base)
-
-    # Average weighted probability across the n_bases
-    weighted_unpaired_prob = sum(weighted_unpaired_probs) / len(weighted_unpaired_probs)
-
-    return monomer_fraction, weighted_unpaired_prob
+    return ComprehensiveAnalysisResult(
+        primary_monomer_fraction=monomer_fraction,
+        dimer_fraction=dimer_fraction_dict,
+        weighted_three_prime_unpaired_prob=weighted_unpaired_prob,
+        weighted_three_prime_unpaired_probs=weighted_unpaired_probs,
+        weighted_dimer_three_prime_paired_prob=weighted_dimer_three_prime_paired_prob,
+        weighted_dimer_three_prime_paired_probs=weighted_dimer_three_prime_paired_probs,
+    )
 
 
 def print_bound_fraction_summary(

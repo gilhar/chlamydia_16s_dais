@@ -9,6 +9,7 @@ from chlamydia_16s_dais.nupack_complex_analysis import (
     analyze_primer_dais_binding,
     analyze_four_primer_cross_reactivity,
 )
+from chlamydia_16s_dais.nasba_primer_thermodynamics import NASBA_CONDITIONS
 
 
 def test_basic_analysis():
@@ -61,7 +62,7 @@ def test_primer_dais_binding():
             dais_sequence=dais_seq,
             primer_name="test_primer",
             dais_name="test_dais",
-            temperature_celsius=41.0,
+            temperature_celsius=NASBA_CONDITIONS['target_temp_C'],
             concentration_nanomolar=250.0,
         )
 
@@ -90,7 +91,7 @@ def test_four_primer_analysis():
     try:
         results = analyze_four_primer_cross_reactivity(
             primer_sequences=primers,
-            temperature_celsius=41.0,
+            temperature_celsius=NASBA_CONDITIONS['target_temp_C'],
             concentration_nanomolar=250.0,
         )
 

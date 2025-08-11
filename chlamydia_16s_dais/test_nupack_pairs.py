@@ -9,6 +9,7 @@ to understand its structure and indexing scheme.
 import numpy as np
 import nupack
 from nupack import SetSpec
+from chlamydia_16s_dais.nasba_primer_thermodynamics import NASBA_CONDITIONS
 
 
 def test_nupack_pairs_matrix():
@@ -34,7 +35,12 @@ def test_nupack_pairs_matrix():
     print(f"Strand 2: {strand2} (length: {len(seq2)})")
 
     # Create thermodynamic model (NASBA conditions)
-    model = nupack.Model(material='dna', celsius=41.0, sodium=0.08, magnesium=0.012)
+    model = nupack.Model(
+        material='dna',
+        celsius=NASBA_CONDITIONS['target_temp_C'],
+        sodium=NASBA_CONDITIONS['Na_mM'] / 1e3,
+        magnesium=NASBA_CONDITIONS['Mg_mM'] / 1e3
+    )
 
     # Create tube with both strands
     tube = nupack.Tube(
@@ -118,7 +124,12 @@ def test_single_strand():
 
     strand = nupack.Strand(seq, name='single_strand', material='dna')
 
-    model = nupack.Model(material='dna', celsius=41.0, sodium=0.08, magnesium=0.012)
+    model = nupack.Model(
+        material='dna',
+        celsius=NASBA_CONDITIONS['target_temp_C'],
+        sodium=NASBA_CONDITIONS['Na_mM'] / 1e3,
+        magnesium=NASBA_CONDITIONS['Mg_mM'] / 1e3
+    )
 
     tube = nupack.Tube(
         name='single_tube',

@@ -10,10 +10,10 @@ Usage example:
         SequenceParam(name="signal", sequence="TGCA...", concentration_M=10e-12),
     ]
     result = analyze_sequence_complexes_subprocess(
-        temperature_celsius=41.0,
+        temperature_celsius=NASBA_CONDITIONS['target_temp_C'],
         sequences=sequences,
-        sodium_millimolar=80.0,
-        magnesium_millimolar=12.0,
+        sodium_millimolar=NASBA_CONDITIONS['Na_mM'],
+        magnesium_millimolar=NASBA_CONDITIONS['Mg_mM'],
         max_complex_size=2,
         base_pairing_analysis=True,
         timeout_seconds=120,
@@ -26,6 +26,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
+
+from .nasba_primer_thermodynamics import NASBA_CONDITIONS
 
 
 @dataclass
