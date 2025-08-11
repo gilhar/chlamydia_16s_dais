@@ -127,9 +127,9 @@ def _analyze_sequences_with_nupack(
     sequences: List[str],
     sequence_names: List[str],
     concentrations_molar: List[float],
-    temp_celsius: float = NASBA_TEMPERATURE_CELSIUS,
-    sodium_molar: float = NASBA_SODIUM_MOLAR,
-    magnesium_molar: float = NASBA_MAGNESIUM_MOLAR,
+    temp_celsius: float = NASBA_CONDITIONS['target_temp_C'],
+    sodium_molar: float = NASBA_CONDITIONS['Na_mM'] / 1e3,
+    magnesium_molar: float = NASBA_CONDITIONS['Mg_mM'] / 1e3,
     max_complex_size: int = 2,
     include_base_pairing: bool = False,
 ) -> NupackAnalysisResult:
@@ -346,9 +346,9 @@ def calculate_dimer_formation_probability(
     sequence2: str,
     sequence1_concentration_molar: float,
     sequence2_concentration_molar: float,
-    temp_celsius: float = NASBA_TEMPERATURE_CELSIUS,
-    sodium_molar: float = NASBA_SODIUM_MOLAR,
-    magnesium_molar: float = NASBA_MAGNESIUM_MOLAR,
+    temp_celsius: float = NASBA_CONDITIONS['target_temp_C'],
+    sodium_molar: float = NASBA_CONDITIONS['Na_mM'] / 1e3,
+    magnesium_molar: float = NASBA_CONDITIONS['Mg_mM'] / 1e3,
 ) -> float:
     """
     Calculate the dimer formation probability between two sequences using NUPACK.
@@ -668,9 +668,9 @@ def analyze_multi_primer_solution(
     primer_names: List[str],
     primer_concentrations: List[float],
     n_bases: int = 3,
-    temp_celsius: float = NASBA_TEMPERATURE_CELSIUS,
-    sodium_molar: float = NASBA_SODIUM_MOLAR,
-    magnesium_molar: float = NASBA_MAGNESIUM_MOLAR,
+    temp_celsius: float = NASBA_CONDITIONS['target_temp_C'],
+    sodium_molar: float = NASBA_CONDITIONS['Na_mM'] / 1e3,
+    magnesium_molar: float = NASBA_CONDITIONS['Mg_mM'] / 1e3,
 ) -> Dict[str, Dict[str, float | tuple[float, ...]]]:
     """
     Efficiently analyze all primers in a multi-primer solution with a single NUPACK run.
@@ -795,9 +795,9 @@ def analyze_multi_primer_solution(
 def calculate_bound_fraction_nupack(
     primer_sequence: str,
     target_sequence: str,
-    temp_celsius: float = NASBA_TEMPERATURE_CELSIUS,
-    sodium_molar: float = NASBA_SODIUM_MOLAR,
-    magnesium_molar: float = NASBA_MAGNESIUM_MOLAR,
+    temp_celsius: float = NASBA_CONDITIONS['target_temp_C'],
+    sodium_molar: float = NASBA_CONDITIONS['Na_mM'] / 1e3,
+    magnesium_molar: float = NASBA_CONDITIONS['Mg_mM'] / 1e3,
     primer_concentration_molar: float = NASBA_PRIMER_CONCENTRATION_MOLAR,
 ) -> float:
     """

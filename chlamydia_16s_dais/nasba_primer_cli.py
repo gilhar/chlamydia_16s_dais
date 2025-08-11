@@ -19,9 +19,7 @@ from chlamydia_nasba_primer import (
 from nasba_primer_thermodynamics import (
     update_bound_fraction_targets,
     get_bound_fraction_targets,
-    NASBA_TEMPERATURE_CELSIUS,
-    NASBA_SODIUM_MOLAR,
-    NASBA_MAGNESIUM_MOLAR,
+    NASBA_CONDITIONS,
     NASBA_PRIMER_CONCENTRATION_MOLAR,
 )
 from nasba_primer_validation import (
@@ -42,28 +40,28 @@ def cli():
     type=float,
     default=0.97,
     show_default=True,
-    help=f'Minimum bound fraction for anchor segment at {NASBA_TEMPERATURE_CELSIUS}°C',
+    help=f'Minimum bound fraction for anchor segment at {NASBA_CONDITIONS["target_temp_C"]}°C',
 )
 @click.option(
     '--anchor-max-bf',
     type=float,
     default=1.0,
     show_default=True,
-    help=f'Maximum bound fraction for anchor segment at {NASBA_TEMPERATURE_CELSIUS}°C',
+    help=f'Maximum bound fraction for anchor segment at {NASBA_CONDITIONS["target_temp_C"]}°C',
 )
 @click.option(
     '--toehold-min-bf',
     type=float,
     default=0.6,
     show_default=True,
-    help=f'Minimum bound fraction for toehold segment at {NASBA_TEMPERATURE_CELSIUS}°C',
+    help=f'Minimum bound fraction for toehold segment at {NASBA_CONDITIONS["target_temp_C"]}°C',
 )
 @click.option(
     '--toehold-max-bf',
     type=float,
     default=0.9,
     show_default=True,
-    help=f'Maximum bound fraction for toehold segment at {NASBA_TEMPERATURE_CELSIUS}°C',
+    help=f'Maximum bound fraction for toehold segment at {NASBA_CONDITIONS["target_temp_C"]}°C',
 )
 def generate(anchor_min_bf, anchor_max_bf, toehold_min_bf, toehold_max_bf):
     """
@@ -86,7 +84,7 @@ def generate(anchor_min_bf, anchor_max_bf, toehold_min_bf, toehold_max_bf):
     )
 
     bf_targets = get_bound_fraction_targets()
-    print(f"\nBound fraction targets at {NASBA_TEMPERATURE_CELSIUS}°C:")
+    print(f"\nBound fraction targets at {NASBA_CONDITIONS['target_temp_C']}°C:")
     print(
         f"  Anchor:   {bf_targets['anchor_min']:.2f} - {bf_targets['anchor_max']:.2f}"
     )
@@ -143,7 +141,7 @@ def targets():
     """Show current bound fraction targets."""
     bf_targets = get_bound_fraction_targets()
 
-    print(f"Current bound fraction targets at {NASBA_TEMPERATURE_CELSIUS}°C:")
+    print(f"Current bound fraction targets at {NASBA_CONDITIONS['target_temp_C']}°C:")
     print(
         f"  Anchor segment:   {bf_targets['anchor_min']:.3f} - {bf_targets['anchor_max']:.3f}"
     )
@@ -156,7 +154,7 @@ def targets():
     print("  - Toehold should be moderately bound (allows strand displacement)")
     print("  - Values are calculated using NUPACK thermodynamics at NASBA conditions")
     print(
-        f"    ({NASBA_TEMPERATURE_CELSIUS}°C, {NASBA_SODIUM_MOLAR*1000:.0f}mM Na+, {NASBA_MAGNESIUM_MOLAR*1000:.0f}mM Mg++, {NASBA_PRIMER_CONCENTRATION_MOLAR*1e9:.0f}nM primer concentration)"
+        f"    ({NASBA_CONDITIONS['target_temp_C']}°C, {NASBA_CONDITIONS['Na_mM']:.0f}mM Na+, {NASBA_CONDITIONS['Mg_mM']:.0f}mM Mg++, {NASBA_CONDITIONS['primer_uM']*1e3:.0f}nM primer concentration)"
     )
 
 
@@ -165,7 +163,7 @@ def targets():
 @click.option(
     '--temp',
     type=float,
-    default=NASBA_TEMPERATURE_CELSIUS,
+    default=NASBA_CONDITIONS['target_temp_C'],
     show_default=True,
     help='Temperature in Celsius',
 )
@@ -189,8 +187,8 @@ def test_sequence(sequence, temp):
         primer_sequence=sequence,
         target_sequence=rc_sequence,
         temp_celsius=temp,
-        sodium_molar=NASBA_SODIUM_MOLAR,
-        magnesium_molar=NASBA_MAGNESIUM_MOLAR,
+        sodium_molar=NASBA_CONDITIONS['Na_mM'] / 1e3,
+        magnesium_molar=NASBA_CONDITIONS['Mg_mM'] / 1e3,
         primer_concentration_molar=NASBA_PRIMER_CONCENTRATION_MOLAR,
     )
 

@@ -38,10 +38,9 @@ from nasba_primer_thermodynamics import (
     analyze_multi_primer_solution,
     analyze_sequence_comprehensive,
     DEFAULT_ASSAY_CONCENTRATIONS,
-    NASBA_TEMPERATURE_CELSIUS,
-    NASBA_SODIUM_MOLAR,
-    NASBA_MAGNESIUM_MOLAR,
-    NASBA_PRIMER_CONCENTRATION_MOLAR, calculate_weighted_three_prime_end_paired_probabilities, NASBA_CONDITIONS,
+    NASBA_PRIMER_CONCENTRATION_MOLAR,
+    calculate_weighted_three_prime_end_paired_probabilities,
+    NASBA_CONDITIONS,
 )
 from nupack_complex_analysis import (
     SequenceInput,
@@ -245,7 +244,7 @@ VALIDATION_THRESHOLDS = {
 
 # NASBA primer testing conditions - using centralized constants
 TESTING_CONDITIONS = {
-    'temperature_C': NASBA_TEMPERATURE_CELSIUS,
+    'temperature_C': NASBA_CONDITIONS['target_temp_C'],
     'primer_concentration_nM': NASBA_PRIMER_CONCENTRATION_MOLAR * 1e9,  # Convert M to nM
     'dais_concentration_nM': 250,  # 250nM
     'signal_concentration_pM': 10,  # 10pM for signal binding tests
@@ -561,8 +560,8 @@ def calculate_dimer_formation_probability_with_assay_concentrations(
         sequence1_concentration_molar=seq1_conc,
         sequence2_concentration_molar=seq2_conc,
         temp_celsius=temperature_celsius,
-        sodium_molar=NASBA_SODIUM_MOLAR,
-        magnesium_molar=NASBA_MAGNESIUM_MOLAR,
+        sodium_molar=NASBA_CONDITIONS['Na_mM'] / 1e3,
+        magnesium_molar=NASBA_CONDITIONS['Mg_mM'] / 1e3,
     )
 
 
