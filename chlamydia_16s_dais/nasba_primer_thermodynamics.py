@@ -17,7 +17,6 @@ Date: 2025
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
 import nupack
-from Bio.PDB.ic_data import primary_angles
 from nupack import SetSpec
 
 # ============================================================================
@@ -193,7 +192,7 @@ def _analyze_sequences_with_nupack(
             strands.append(strand)
             strand_concentrations[strand] = conc
 
-        # Create thermodynamic model
+        # Create a thermodynamic model
         model = nupack.Model(
             material='dna',
             celsius=temp_celsius,
@@ -201,7 +200,7 @@ def _analyze_sequences_with_nupack(
             magnesium=magnesium_molar,
         )
 
-        # Create tube with specified concentrations
+        # Create a tube with specified concentrations
         tube = nupack.Tube(
             name='analysis_tube',
             strands=strand_concentrations,
@@ -239,7 +238,7 @@ def _analyze_sequences_with_nupack(
             pairing_probs = {}
             strand_id_map = {}
 
-            # Process all complexes - they must all have pairs data since we requested it
+            # Process all complexes - they must all have pairing data since we requested it
             for complex_obj, complex_result in result.complexes.items():
                 if not hasattr(complex_result, 'pairs'):
                     raise ValueError(
@@ -540,18 +539,23 @@ def calculate_weighted_three_prime_end_paired_probabilities(
         contribution_to_primer_conc *= 2
 
     # Weight by the fraction of primer that's in this complex
-    weight = (
-        contribution_to_primer_conc / limiting_sequence_concentration_molar
-    )
+    weight = contribution_to_primer_conc / limiting_sequence_concentration_molar
 
-    if len(dimer_id_map) != 2 or sequence_name not in dimer_id_map or other_sequence_name not in dimer_id_map:
+    if (
+        len(dimer_id_map) != 2
+        or sequence_name not in dimer_id_map.values()
+        or other_sequence_name not in dimer_id_map.values()
+    ):
         raise ValueError(
             f"Invalid dimer_id_map: {dimer_id_map} for sequence {sequence_name} and other sequence {other_sequence_name}"
         )
 
     sequence_strand_idx = 0 if sequence_name == dimer_id_map[0] else 1
-    other_sequence_strand_idx = 0 if other_sequence_name == dimer_id_map[1] else 1
-    if dimer_id_map[sequence_strand_idx] != sequence_name or dimer_id_map[other_sequence_strand_idx] != other_sequence_name:
+    other_sequence_strand_idx = 0 if other_sequence_name == dimer_id_map[0] else 1
+    if (
+        dimer_id_map[sequence_strand_idx] != sequence_name
+        or dimer_id_map[other_sequence_strand_idx] != other_sequence_name
+    ):
         raise ValueError(
             f"Strand indices do not match names: {dimer_id_map} for sequence {sequence_name} and other sequence {other_sequence_name}"
         )
@@ -1127,23 +1131,29 @@ def calculate_monomer_fractions(
 
     return seq1_fraction, seq2_fraction
 
+
 # define a dataclass to hold the results of the calculation
 @dataclass
 class ComprehensiveAnalysisResult:
     """Results of NASBA calculation for a primer candidate."""
+
     primary_monomer_fraction: float
-    dimer_fraction: dict[str, float] # sequence name to primer+sequence fraction
-    weighted_three_prime_unpaired_prob: float # primer 3'-end average unpaired probability
-    weighted_three_prime_unpaired_probs: tuple[float, ...] # primer 3'-end unpaired probabilities
-    weighted_dimer_three_prime_paired_prob: dict[str, float] # average probability of
+    dimer_fraction: dict[str, float]  # sequence name to primer+sequence fraction
+    weighted_three_prime_unpaired_prob: (
+        float  # primer 3'-end average unpaired probability
+    )
+    weighted_three_prime_unpaired_probs: tuple[
+        float, ...
+    ]  # primer 3'-end unpaired probabilities
+    weighted_dimer_three_prime_paired_prob: dict[str, float]  # average probability of
     weighted_dimer_three_prime_paired_probs: dict[str, tuple[float, ...]]
 
 
-def analyze_sequence_comprehensive(
+def analyze_sequence_comprehensive_inprocess(
     primary_sequence: str,
     primary_sequence_name: str,
     primary_sequence_concentration: float,
-    other_sequences: dict[str, str], # from sequence name to sequence
+    other_sequences: dict[str, str],  # from sequence name to sequence
     other_sequence_concentrations: dict[str, float],
     temp_celsius: float,
     n_bases: int = 3,
@@ -1151,9 +1161,14 @@ def analyze_sequence_comprehensive(
 
     # Create lists for multi-strand analysis
     all_sequences = [primary_sequence] + list(other_sequences.values())
-    all_names = [f'seq_{i}_{name}' for i, name in enumerate([primary_sequence_name] + list(other_sequences.keys()))]
+    all_names = [
+        f'seq_{i}_{name}'
+        for i, name in enumerate([primary_sequence_name] + list(other_sequences.keys()))
+    ]
     primary_seq_name = all_names[0]
-    all_concentrations = [primary_sequence_concentration] + list(other_sequence_concentrations)
+    all_concentrations = [primary_sequence_concentration] + list(
+        other_sequence_concentrations.values()
+    )
 
     # Perform single NUPACK analysis
     result = _analyze_sequences_with_nupack(
@@ -1180,7 +1195,9 @@ def analyze_sequence_comprehensive(
             break
 
     monomer_fraction = (
-        primary_monomer_concentration / primary_sequence_concentration if primary_sequence_concentration > 0 else 0.0
+        primary_monomer_concentration / primary_sequence_concentration
+        if primary_sequence_concentration > 0
+        else 0.0
     )
 
     weighted_unpaired_prob, weighted_unpaired_probs = (
@@ -1202,28 +1219,33 @@ def analyze_sequence_comprehensive(
         other_seq_name = f'seq_{i+1}_{other_sequence_name}'
         for complex_obj, complex_conc in result.complex_concentrations.items():
             complex_strand_map = result.strand_id_map[complex_obj]
-            if (len(complex_strand_map) != 2
-                    or primary_seq_name not in complex_strand_map.values()
-                    or other_seq_name not in complex_strand_map.values()
+            if (
+                len(complex_strand_map) != 2
+                or primary_seq_name not in complex_strand_map.values()
+                or other_seq_name not in complex_strand_map.values()
             ):
                 continue
             # This is a dimer complex containing our primer and the other sequence
-            dimer_fraction_dict[other_sequence_name] = (
-                complex_conc / min(primary_sequence_concentration, other_sequence_concentrations[other_seq_name])
+            dimer_fraction_dict[other_sequence_name] = complex_conc / min(
+                primary_sequence_concentration,
+                other_sequence_concentrations[other_sequence_name],
             )
-            weighted_dimer_three_prime_paired_prob[other_sequence_name], weighted_dimer_three_prime_paired_probs[other_sequence_name] = (
-                calculate_weighted_three_prime_end_paired_probabilities(
-                    sequence_name=primary_seq_name,
-                    other_sequence_name=other_seq_name,
-                    sequence=primary_sequence,
-                    other_sequence=other_sequences[other_sequence_name],
-                    sequence_concentration_molar=primary_sequence_concentration,
-                    other_sequence_concentration_molar=other_sequence_concentrations[other_sequence_name],
-                    dimer_concentration=complex_conc,
-                    dimer_unpaired_probabilities=result.unpaired_probabilities[complex_obj],
-                    dimer_id_map=complex_strand_map,
-                    n_bases=n_bases,
-                )
+            (
+                weighted_dimer_three_prime_paired_prob[other_sequence_name],
+                weighted_dimer_three_prime_paired_probs[other_sequence_name],
+            ) = calculate_weighted_three_prime_end_paired_probabilities(
+                sequence_name=primary_seq_name,
+                other_sequence_name=other_seq_name,
+                sequence=primary_sequence,
+                other_sequence=other_sequences[other_sequence_name],
+                sequence_concentration_molar=primary_sequence_concentration,
+                other_sequence_concentration_molar=other_sequence_concentrations[
+                    other_sequence_name
+                ],
+                dimer_concentration=complex_conc,
+                dimer_unpaired_probabilities=result.unpaired_probabilities[complex_obj],
+                dimer_id_map=complex_strand_map,
+                n_bases=n_bases,
             )
 
     return ComprehensiveAnalysisResult(

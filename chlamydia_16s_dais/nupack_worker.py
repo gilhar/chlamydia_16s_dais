@@ -45,9 +45,13 @@ from chlamydia_16s_dais.nupack_complex_analysis import (
     SequenceInput,
     ComplexAnalysisResult,
 )
+from chlamydia_16s_dais.nasba_primer_thermodynamics import (
+    analyze_sequence_comprehensive_inprocess,
+    ComprehensiveAnalysisResult,
+)
 
 
-def _serialize_result(res: ComplexAnalysisResult) -> Dict[str, Any]:
+def analyze_sequence_complexes_serialize_result(res: ComplexAnalysisResult) -> Dict[str, Any]:
     """Convert ComplexAnalysisResult into a JSON-serializable dict."""
     out: Dict[str, Any] = {
         "temperature_celsius": res.temperature_celsius,
@@ -58,6 +62,21 @@ def _serialize_result(res: ComplexAnalysisResult) -> Dict[str, Any]:
     }
 
     for c in res.complexes:
+        if c.unpaired_probability is not None:
+            e_unpaired_probability = {
+                f"{k[0]}:{k[1]}": v
+                for k, v in c.unpaired_probability.items()
+            }
+        else:
+            e_unpaired_probability = None
+
+        if c.pairing_probability is not None:
+            e_pairing_probability = {
+                f"{k[0]}:{k[1]}|{k[2]}:{k[3]}": v
+                for k, v in c.pairing_probability.items()
+            }
+        else:
+            e_pairing_probability = None
         entry = {
             "complex_id": c.complex_id,
             "size": c.size,
@@ -65,23 +84,24 @@ def _serialize_result(res: ComplexAnalysisResult) -> Dict[str, Any]:
             "sequence_id_map": {
                 str(k): v for k, v in (c.sequence_id_map or {}).items()
             },
-            "unpaired_probability": None,
-            "pairing_probability": None,
+            "unpaired_probability": e_unpaired_probability,
+            "pairing_probability": e_pairing_probability,
         }
-        if c.unpaired_probability is not None:
-            # keys are tuples (seq_id, base_offset) -> stringify as "seq:base"
-            entry["unpaired_probability"] = {
-                f"{k[0]}:{k[1]}": v for k, v in c.unpaired_probability.items()
-            }
-        if c.pairing_probability is not None:
-            # keys are 4-tuples -> stringify as "s1:b1|s2:b2"
-            entry["pairing_probability"] = {
-                f"{k[0]}:{k[1]}|{k[2]}:{k[3]}": v
-                for k, v in c.pairing_probability.items()
-            }
         out["complexes"].append(entry)
 
     return out
+
+
+def _serialize_result_comprehensive(res: ComprehensiveAnalysisResult) -> Dict[str, Any]:
+    """Convert ComprehensiveAnalysisResult into a JSON-serializable dict."""
+    return {
+        "primary_monomer_fraction": res.primary_monomer_fraction,
+        "dimer_fraction": res.dimer_fraction,
+        "weighted_three_prime_unpaired_prob": res.weighted_three_prime_unpaired_prob,
+        "weighted_three_prime_unpaired_probs": list(res.weighted_three_prime_unpaired_probs),
+        "weighted_dimer_three_prime_paired_prob": res.weighted_dimer_three_prime_paired_prob,
+        "weighted_dimer_three_prime_paired_probs": {k: list(v) for k, v in res.weighted_dimer_three_prime_paired_probs.items()},
+    }
 
 
 def main() -> int:
@@ -89,38 +109,73 @@ def main() -> int:
         raw = sys.stdin.read()
         payload = json.loads(raw)
 
-        # Basic validation
-        required_fields = [
-            "temperature_celsius",
-            "sequences",
-            "sodium_millimolar",
-            "magnesium_millimolar",
-            "max_complex_size",
-            "base_pairing_analysis",
-        ]
-        for f in required_fields:
-            if f not in payload:
-                raise ValueError(f"Missing required field '{f}'")
+        # Check which function to run
+        function_name = payload.get("function", "analyze_sequence_complexes")
+        
+        if function_name == "analyze_sequence_complexes":
+            # Basic validation for complexes analysis
+            required_fields = [
+                "temperature_celsius",
+                "sequences",
+                "sodium_millimolar",
+                "magnesium_millimolar",
+                "max_complex_size",
+                "base_pairing_analysis",
+            ]
+            for f in required_fields:
+                if f not in payload:
+                    raise ValueError(f"Missing required field '{f}'")
 
-        seq_inputs = [
-            SequenceInput(
-                name=s["name"],
-                sequence=s["sequence"],
-                concentration_M=s["concentration_M"],
+            seq_inputs = [
+                SequenceInput(
+                    name=s["name"],
+                    sequence=s["sequence"],
+                    concentration_M=s["concentration_M"],
+                )
+                for s in payload["sequences"]
+            ]
+
+            res = analyze_sequence_complexes_inprocess(
+                temperature_celsius=payload["temperature_celsius"],
+                sequences=seq_inputs,
+                sodium_millimolar=payload["sodium_millimolar"],
+                magnesium_millimolar=payload["magnesium_millimolar"],
+                max_complex_size=payload["max_complex_size"],
+                base_pairing_analysis=payload["base_pairing_analysis"],
             )
-            for s in payload["sequences"]
-        ]
 
-        res = analyze_sequence_complexes_inprocess(
-            temperature_celsius=payload["temperature_celsius"],
-            sequences=seq_inputs,
-            sodium_millimolar=payload["sodium_millimolar"],
-            magnesium_millimolar=payload["magnesium_millimolar"],
-            max_complex_size=payload["max_complex_size"],
-            base_pairing_analysis=payload["base_pairing_analysis"],
-        )
+            output = analyze_sequence_complexes_serialize_result(res)
+            
+        elif function_name == "analyze_sequence_comprehensive":
+            # Basic validation for comprehensive analysis
+            required_fields = [
+                "primary_sequence",
+                "primary_sequence_name",
+                "primary_sequence_concentration", 
+                "other_sequences",
+                "other_sequence_concentrations",
+                "temp_celsius",
+                "n_bases",
+            ]
+            for f in required_fields:
+                if f not in payload:
+                    raise ValueError(f"Missing required field '{f}'")
+            
+            res = analyze_sequence_comprehensive_inprocess(
+                primary_sequence=payload["primary_sequence"],
+                primary_sequence_name=payload["primary_sequence_name"],
+                primary_sequence_concentration=payload["primary_sequence_concentration"],
+                other_sequences=payload["other_sequences"],
+                other_sequence_concentrations=payload["other_sequence_concentrations"],
+                temp_celsius=payload["temp_celsius"],
+                n_bases=payload["n_bases"],
+            )
+            
+            output = _serialize_result_comprehensive(res)
+            
+        else:
+            raise ValueError(f"Unknown function '{function_name}'. Supported: analyze_sequence_complexes, analyze_sequence_comprehensive")
 
-        output = _serialize_result(res)
         sys.stdout.write(json.dumps(output))
         sys.stdout.flush()
         return 0

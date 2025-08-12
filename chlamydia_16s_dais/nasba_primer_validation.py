@@ -16,31 +16,42 @@ Date: 2025
 
 import os
 import sys
-from typing import Dict, List, Optional, Callable, Tuple
-from dataclasses import dataclass, field
+from typing import Tuple
+from dataclasses import dataclass, field, asdict
 
 import click
+import pandas as pd
 from Bio.Seq import Seq
 from Bio import SeqIO
-import pandas as pd
+
+# Add near the top of the file (imports)
+from typing import Dict, Any, Callable, Optional, List
+import logging
+
+from chlamydia_16s_dais.nupack_subprocess import analyze_sequence_comprehensive_subprocess
+from util.cache_utils import (
+    make_cache_path,
+    read_cached_result,
+    write_cached_result,
+    DEFAULT_CACHE_ROOT,
+)
 
 
 # Import from the main NASBA primer module
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from chlamydia_nasba_primer import (
-    get_base_primers,
     GenericPrimerSet,
+    get_base_primers,
     generate_nasba_primer_candidates,
 )
 from nasba_primer_thermodynamics import (
     calculate_primer_bound_fractions,
     validate_bound_fractions,
-    analyze_multi_primer_solution,
-    analyze_sequence_comprehensive,
     DEFAULT_ASSAY_CONCENTRATIONS,
     NASBA_PRIMER_CONCENTRATION_MOLAR,
-    calculate_weighted_three_prime_end_paired_probabilities,
     NASBA_CONDITIONS,
+    analyze_multi_primer_solution,
+    calculate_weighted_three_prime_end_paired_probabilities,
 )
 from nupack_complex_analysis import (
     SequenceInput,
@@ -245,12 +256,41 @@ VALIDATION_THRESHOLDS = {
 # NASBA primer testing conditions - using centralized constants
 TESTING_CONDITIONS = {
     'temperature_C': NASBA_CONDITIONS['target_temp_C'],
-    'primer_concentration_nM': NASBA_PRIMER_CONCENTRATION_MOLAR * 1e9,  # Convert M to nM
+    'primer_concentration_nM': NASBA_PRIMER_CONCENTRATION_MOLAR
+    * 1e9,  # Convert M to nM
     'dais_concentration_nM': 250,  # 250nM
     'signal_concentration_pM': 10,  # 10pM for signal binding tests
     'generic_primer_concentration_nM': 25,  # 25nM for generic primer tests
     'generic_signal_concentration_nM': 1,  # 1nM for generic primer signal tests
 }
+
+# Optionally, define a single place to enable/disable caching or redirect cache root.
+CACHE_ENABLED = True
+CACHE_ROOT = DEFAULT_CACHE_ROOT  # or Path("my_custom_cache_dir")
+
+
+def aggregate_results_from_cache(
+    test_id: str,
+    include_sub_hashes: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Load all cached entries for a test_id (useful to ensure that a final output contains
+    results from previous runs even if we didn’t touch those pairs this time).
+    If include_sub_hashes is True, also include files with --<hash>.json suffixes.
+    """
+    results: List[Dict[str, Any]] = []
+    test_dir = CACHE_ROOT / test_id
+    if not test_dir.exists():
+        return results
+
+    for p in test_dir.glob("*.json"):
+        if not include_sub_hashes and "--" in p.stem:
+            continue
+        res = read_cached_result(p)
+        if res is not None:
+            results.append(res)
+    return results
+
 
 
 # ============================================================================
@@ -527,8 +567,12 @@ def calculate_dimer_formation_probability_with_assay_concentrations(
         seq1_conc = concentrations.primer_dais_binding['primer_concentration_M']
         seq2_conc = concentrations.primer_dais_binding['target_dais_concentration_M']
     elif assay_type == "cross_reactivity":
-        seq1_conc = concentrations.primer_non_signal_cross_reactivity['primer_concentration_M']
-        seq2_conc = concentrations.primer_non_signal_cross_reactivity['other_sequence_concentration_M']
+        seq1_conc = concentrations.primer_non_signal_cross_reactivity[
+            'primer_concentration_M'
+        ]
+        seq2_conc = concentrations.primer_non_signal_cross_reactivity[
+            'other_sequence_concentration_M'
+        ]
     elif assay_type == "off_target_dais":
         seq1_conc = concentrations.off_target_dais['primer_concentration_M']
         seq2_conc = concentrations.off_target_dais['non_intended_dais_concentration_M']
@@ -594,10 +638,11 @@ def calculate_3_prime_unpaired_probability(
             "No competing sequences provided. Cannot calculate unpaired probability without competition."
         )
 
-    comprehensive_result = analyze_sequence_comprehensive(
+    comprehensive_result = analyze_sequence_comprehensive_subprocess(
         primary_sequence=primer_seq,
         primary_sequence_name='target_primer',
-        primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM'] * 1e-9,
+        primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM']
+        * 1e-9,
         other_sequences={
             f'competing_{i}': competing_sequences[i]
             for i in range(len(competing_sequences))
@@ -614,6 +659,7 @@ def calculate_3_prime_unpaired_probability(
         comprehensive_result.weighted_three_prime_unpaired_prob,
         comprehensive_result.weighted_three_prime_unpaired_probs,
     )
+
 
 # ============================================================================
 # VALIDATION TESTS
@@ -928,28 +974,35 @@ def test_3_individual_primer_dais_binding(
                 print(f"  - {dais.name} ({dais.species}, {dais.primer_type})")
 
         if non_target_daises:
-            non_target_sequences = [d.sequence for d in non_target_daises]
             non_target_names = [d.name for d in non_target_daises]
 
             # Calculate both monomer fraction and 3'-end unpaired probability
             # from a single multi-sequence NUPACK analysis
-            monomer_fraction, unpaired_3_prime_prob, unpaired_3_prime_probs = (
-                analyze_sequence_comprehensive(
-                    primary_sequence=primer.sequence,
-                    primary_sequence_name=f'primer_{primer.name}',
-                    primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM'] * 1e-9,
-                    other_sequences={
-                        dais.name: dais.sequence for dais in non_target_sequences
-                    },
-                    other_sequence_concentrations={
-                        dais.name: TESTING_CONDITIONS['dais_concentration_nM'] * 1e-9
-                        for dais in non_target_sequences
-                    },
-                    temp_celsius=NASBA_CONDITIONS['target_temp_C'],
-                    n_bases=3,
-                )
+            comprehensive_result = analyze_sequence_comprehensive_subprocess(
+                primary_sequence=primer.sequence,
+                primary_sequence_name=f'primer_{primer.name}',
+                primary_sequence_concentration=TESTING_CONDITIONS[
+                    'primer_concentration_nM'
+                ]
+                * 1e-9,
+                other_sequences={
+                    dais.name: dais.sequence for dais in non_target_daises
+                },
+                other_sequence_concentrations={
+                    dais.name: TESTING_CONDITIONS['dais_concentration_nM'] * 1e-9
+                    for dais in non_target_daises
+                },
+                temp_celsius=NASBA_CONDITIONS['target_temp_C'],
+                n_bases=3,
             )
 
+            monomer_fraction = comprehensive_result.primary_monomer_fraction
+            unpaired_3_prime_prob = (
+                comprehensive_result.weighted_three_prime_unpaired_prob
+            )
+            unpaired_3_prime_probs = (
+                comprehensive_result.weighted_three_prime_unpaired_probs
+            )
 
             # Check if both criteria are met
             monomer_pass = (
@@ -1092,9 +1145,7 @@ def test_4_primer_signal_binding_specificity(
         signal_seq_name = f'signal_{primer.species}_{primer.primer_type}'
 
         sequences = [
-            SequenceInput(
-                primer_seq_name, primer.sequence, primer_concentration_molar
-            ),
+            SequenceInput(primer_seq_name, primer.sequence, primer_concentration_molar),
             SequenceInput(
                 signal_seq_name,
                 intended_signal,
@@ -1136,17 +1187,19 @@ def test_4_primer_signal_binding_specificity(
         if not dimer_complex:
             raise ValueError(f"Could not find dimer complex for {primer.name}")
 
-        three_prime_binding_prob, three_prime_binding_probs = calculate_weighted_three_prime_end_paired_probabilities(
-            sequence_name=f"primer_{primer.name}",
-            other_sequence_name=f"signal_{primer.species}_{primer.primer_type}",
-            sequence=primer.sequence,
-            other_sequence=intended_signal,
-            sequence_concentration_molar=primer_concentration_molar,
-            other_sequence_concentration_molar=signal_concentration_molar,
-            dimer_concentration=dimer_complex.concentration_molar,
-            dimer_unpaired_probabilities=dimer_complex.unpaired_probability,
-            dimer_id_map=dimer_complex.sequence_id_map,
-            n_bases=3,
+        three_prime_binding_prob, three_prime_binding_probs = (
+            calculate_weighted_three_prime_end_paired_probabilities(
+                sequence_name=f"primer_{primer.name}",
+                other_sequence_name=f"signal_{primer.species}_{primer.primer_type}",
+                sequence=primer.sequence,
+                other_sequence=intended_signal,
+                sequence_concentration_molar=primer_concentration_molar,
+                other_sequence_concentration_molar=signal_concentration_molar,
+                dimer_concentration=dimer_complex.concentration_molar,
+                dimer_unpaired_probabilities=dimer_complex.unpaired_probability,
+                dimer_id_map=dimer_complex.sequence_id_map,
+                n_bases=3,
+            )
         )
 
         # Check validation criteria
@@ -1297,20 +1350,29 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
 
             primer_seq_name = f'primer_{primer.name}'
 
-            comprehensive_result = analyze_sequence_comprehensive(
+            comprehensive_result = analyze_sequence_comprehensive_subprocess(
                 primary_sequence=primer.sequence,
                 primary_sequence_name=primer_seq_name,
-                primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM'] * 1e-9,
-                other_sequences={ signal_name: signal_sequence},
-                other_sequence_concentrations={ signal_name: TESTING_CONDITIONS['signal_concentration_pM'] * 1e-12 },
+                primary_sequence_concentration=TESTING_CONDITIONS[
+                    'primer_concentration_nM'
+                ]
+                * 1e-9,
+                other_sequences={signal_name: signal_sequence},
+                other_sequence_concentrations={
+                    signal_name: TESTING_CONDITIONS['signal_concentration_pM'] * 1e-12
+                },
                 temp_celsius=NASBA_CONDITIONS['target_temp_C'],
                 n_bases=3,
             )
 
             monomer_fraction = comprehensive_result.primary_monomer_fraction
             primer_signal_binding = comprehensive_result.dimer_fraction[signal_name]
-            unpaired_3_prime_prob = comprehensive_result.weighted_three_prime_unpaired_prob
-            unpaired_3_prime_probs = comprehensive_result.weighted_three_prime_unpaired_probs
+            unpaired_3_prime_prob = (
+                comprehensive_result.weighted_three_prime_unpaired_prob
+            )
+            unpaired_3_prime_probs = (
+                comprehensive_result.weighted_three_prime_unpaired_probs
+            )
 
             # Validation criteria (primers should NOT bind significantly to unintended signals)
             low_binding_pass = primer_signal_binding <= (
@@ -1801,9 +1863,7 @@ def test_7_generic_primer_amplicon_binding_specificity(
         ]
 
         if not ct_amplicons_set or not ng_amplicons_set:
-            raise RuntimeError(
-                f'No amplicons found for generic set "{generic_set}"'
-            )
+            raise RuntimeError(f'No amplicons found for generic set "{generic_set}"')
 
         # Test generic forward primer with sense amplicons (both C.T and N.G)
         for amplicon in ct_amplicons_set + ng_amplicons_set:
@@ -1855,12 +1915,7 @@ def _test_generic_primer_binding(
         TESTING_CONDITIONS['generic_signal_concentration_nM'] * 1e-9
     )  # Convert nM to M
 
-    sequences = [
-        SequenceInput(primer_name, primer_sequence, primer_concentration_molar),
-        SequenceInput(signal_name, signal_sequence, signal_concentration_molar),
-    ]
-
-    comprehensive_result = analyze_sequence_comprehensive(
+    comprehensive_result = analyze_sequence_comprehensive_subprocess(
         primary_sequence=primer_sequence,
         primary_sequence_name=primer_name,
         primary_sequence_concentration=primer_concentration_molar,
@@ -1875,8 +1930,12 @@ def _test_generic_primer_binding(
     )
 
     primer_signal_binding = comprehensive_result.dimer_fraction[signal_name]
-    three_prime_binding_prob = comprehensive_result.weighted_dimer_three_prime_paired_prob[signal_name]
-    three_prime_binding_probs = comprehensive_result.weighted_dimer_three_prime_paired_probs[signal_name]
+    three_prime_binding_prob = (
+        comprehensive_result.weighted_dimer_three_prime_paired_prob[signal_name]
+    )
+    three_prime_binding_probs = (
+        comprehensive_result.weighted_dimer_three_prime_paired_probs[signal_name]
+    )
 
     # Check validation criteria
     binding_pass = (
@@ -2421,10 +2480,47 @@ class ValidationContext:
     thresholds: Dict[str, float] = field(default_factory=lambda: VALIDATION_THRESHOLDS)
 
 
+def get_cached_primer_result(test_name: str, primer_name: str, context: ValidationContext) -> Optional[ValidationResult]:
+    """Check if a specific primer result is already cached."""
+    if not CACHE_ENABLED:
+        return None
+    
+    inputs_for_hash = {
+        "test_name": test_name,
+        "primer_name": primer_name,
+        "temperature_c": NASBA_CONDITIONS["target_temp_C"],
+        "thresholds": context.thresholds,
+    }
+    
+    cache_path = make_cache_path(
+        test_id=test_name,
+        primer_id=primer_name,
+        inputs_for_hash=inputs_for_hash,
+        cache_root=CACHE_ROOT,
+    )
+    
+    cached_data = read_cached_result(cache_path)
+    if cached_data:
+        logging.debug(f"Cache HIT: Found cached result for test '{test_name}', primer '{primer_name}'")
+        return test_result_dict_to_validation_result(cached_data)
+    else:
+        logging.debug(f"Cache MISS: No cached result for test '{test_name}', primer '{primer_name}'")
+        return None
+
+
+def get_all_primer_names_for_context(context: ValidationContext) -> List[str]:
+    """Extract all primer names that could be tested in the given context."""
+    primer_names = []
+    for primer in context.ct_primers + context.ng_primers:
+        if primer.name:
+            primer_names.append(primer.name)
+    return primer_names
+
+
 def get_tests_registry() -> (
     Dict[str, Callable[[ValidationContext], List[ValidationResult]]]
 ):
-    """Return a registry mapping test names to callables taking a ValidationContext."""
+    """Return a registry, mapping test names to callables taking a ValidationContext."""
     return {
         'test_1': lambda ctx: test_1_hetero_dimer_measurements(
             ctx.ct_primers, ctx.ng_primers, ctx.ct_daises, ctx.ng_daises
@@ -2456,6 +2552,25 @@ def get_tests_registry() -> (
     }
 
 
+# Helper to safely rehydrate a cached dict into ValidationResult
+def test_result_dict_to_validation_result(d: Dict[str, Any]) -> ValidationResult:
+    return ValidationResult(
+        test_name=d.get("test_name", ""),
+        primer_name=d.get("primer_name", ""),
+        target_dais=list(d.get("target_dais") or []),
+        hetero_dimer_fraction=d.get("hetero_dimer_fraction"),
+        monomer_fraction=d.get("monomer_fraction"),
+        unpaired_3_prime_prob=d.get("unpaired_3_prime_prob"),
+        unpaired_3_prime_probs=(
+            tuple(d.get("unpaired_3_prime_probs"))
+            if d.get("unpaired_3_prime_probs") is not None
+            else None
+        ),
+        passed=bool(d.get("passed", False)),
+        details=d.get("details", ""),
+    )
+
+
 def run_selected_tests(
     context: ValidationContext, selected_tests: Optional[List[str]] = None
 ) -> Dict[str, List[ValidationResult]]:
@@ -2479,7 +2594,63 @@ def run_selected_tests(
             raise ValueError(
                 f"Unknown test '{test_name}'. Available: {list(registry.keys())}"
             )
-        results[test_name] = registry[test_name](context)
+
+        # Check cache for each individual primer and collect cached results
+        cached_results: List[ValidationResult] = []
+        all_primer_names = get_all_primer_names_for_context(context)
+        
+        for primer_name in all_primer_names:
+            cached_result = get_cached_primer_result(test_name, primer_name, context)
+            if cached_result:
+                cached_results.append(cached_result)
+        
+        # Determine which primers still need testing (not in cache)
+        cached_primer_names = {vr.primer_name for vr in cached_results}
+        missing_primer_names = set(all_primer_names) - cached_primer_names
+        
+        if missing_primer_names:
+            logging.debug(f"Running test '{test_name}' for {len(missing_primer_names)} uncached primers: {sorted(missing_primer_names)}")
+            # Run the actual test computation (still runs all primers, but we'll filter results)
+            all_computed_results: List[ValidationResult] = registry[test_name](context)
+            # Only keep results for primers that weren't cached
+            computed_results = [vr for vr in all_computed_results if vr.primer_name in missing_primer_names]
+        else:
+            logging.debug(f"All primers for test '{test_name}' found in cache - skipping computation")
+            computed_results = []
+
+        # Persist each computed result immediately and build a merge map
+        merged_by_primer: Dict[str, ValidationResult] = {
+            vr.primer_name: vr for vr in cached_results if vr and vr.primer_name
+        }
+
+        if CACHE_ENABLED:
+            for vr in computed_results:
+                primer_id = vr.primer_name or "unknown_primer"
+                # Minimal, stable inputs for cache disambiguation
+                inputs_for_hash = {
+                    "test_name": test_name,
+                    "primer_name": primer_id,
+                    # Include conditions/thresholds that influence outcomes
+                    "temperature_c": NASBA_CONDITIONS["target_temp_C"],
+                    "thresholds": context.thresholds,
+                }
+                cache_path = make_cache_path(
+                    test_id=test_name,
+                    primer_id=primer_id,
+                    inputs_for_hash=inputs_for_hash,
+                    cache_root=CACHE_ROOT,
+                )
+                payload = asdict(vr)
+                payload.setdefault("test_id", test_name)
+                payload.setdefault("primer_id", primer_id)
+                logging.debug(f"Cache WRITE: Saving result for test '{test_name}', primer '{primer_id}' to {cache_path}")
+                write_cached_result(cache_path, payload)
+
+        # Merge, preferring freshly computed results over cached
+        for vr in computed_results:
+            merged_by_primer[vr.primer_name] = vr
+
+        results[test_name] = list(merged_by_primer.values())
 
     return results
 
@@ -2491,6 +2662,8 @@ def run_selected_tests(
 
 def run_comprehensive_validation() -> Dict:
     """Run all validation tests and return comprehensive results."""
+
+    logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
 
     print("=" * 80)
     print("NASBA PRIMER COMPREHENSIVE VALIDATION FRAMEWORK")
@@ -2588,14 +2761,14 @@ def run_comprehensive_validation() -> Dict:
             amplicons=amplicons,
         )
 
-        # To run a partial set, pass e.g. selected = ['test_4', 'test_5']
-        # selected: Optional[List[str]] = None
-        selected: Optional[List[str]] = [
-            'test_5',
-            'test_6',
-            'test_7',
-            'test_8',
-        ]
+        # To run a partial set, pass e.g., selected = ['test_4', 'test_5']
+        selected: Optional[List[str]] = None
+        # selected: Optional[List[str]] = [
+        #     'test_5',
+        #     'test_6',
+        #     'test_7',
+        #     'test_8',
+        # ]
         pair_results = run_selected_tests(ctx, selected_tests=selected)
 
         # Summary for this primer pair
