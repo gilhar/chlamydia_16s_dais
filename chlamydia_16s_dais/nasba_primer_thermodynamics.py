@@ -768,7 +768,6 @@ def analyze_multi_primer_solution(
                 continue
 
             monomer_concentration = complex_conc
-            break
 
         # Calculate monomer fraction using input concentration as denominator
         monomer_fraction = (

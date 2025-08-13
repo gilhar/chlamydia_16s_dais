@@ -61,6 +61,7 @@ def _build_payload_analyze_sequence_complexes(
         "base_pairing_analysis": bool(base_pairing_analysis),
     }
 
+
 def _build_payload_analyze_sequence_comprehensive(
     primary_sequence: str,
     primary_sequence_name: str,
@@ -75,7 +76,9 @@ def _build_payload_analyze_sequence_comprehensive(
         "primary_sequence_name": primary_sequence_name,
         "primary_sequence_concentration": float(primary_sequence_concentration),
         "other_sequences": other_sequences,
-        "other_sequence_concentrations": {k: float(v) for k, v in other_sequence_concentrations.items()},
+        "other_sequence_concentrations": {
+            k: float(v) for k, v in other_sequence_concentrations.items()
+        },
         "temp_celsius": float(temp_celsius),
         "n_bases": int(n_bases),
     }
@@ -120,7 +123,9 @@ def analyze_sequence_complexes_subprocess(
             start_new_session=True,  # Make it its own process group/session
         )
     except subprocess.TimeoutExpired as te:
-        raise RuntimeError(f"NUPACK worker timed out after {timeout_seconds}s") from te
+        raise RuntimeError(
+            f"NUPACK worker timed out after {timeout_seconds}s"
+        ) from te
 
     if completed.returncode != 0:
         # Worker printed a JSON error object to stderr
@@ -128,7 +133,10 @@ def analyze_sequence_complexes_subprocess(
         try:
             err_obj = json.loads(err_msg) if err_msg else {}
         except Exception:
-            err_obj = {"error": err_msg or "unknown worker error", "traceback": None}
+            err_obj = {
+                "error": err_msg or "unknown worker error",
+                "traceback": None,
+            }
         raise RuntimeError(
             f"NUPACK worker failed: {err_obj.get('error')}\n{err_obj.get('traceback')}"
         )
@@ -157,7 +165,7 @@ def analyze_sequence_comprehensive_subprocess(
     n_bases: int = 3,
     timeout_seconds: int = 250,
     env: Optional[Dict[str, str]] = None,
-) -> ComprehensiveAnalysisResult:
+) -> Dict[str, Any]:
     payload = _build_payload_analyze_sequence_comprehensive(
         primary_sequence=primary_sequence,
         primary_sequence_name=primary_sequence_name,
@@ -168,7 +176,6 @@ def analyze_sequence_comprehensive_subprocess(
         n_bases=n_bases,
     )
     payload["function"] = "analyze_sequence_comprehensive"
-
 
     cmd = [sys.executable, "-m", "chlamydia_16s_dais.nupack_worker"]
 
@@ -209,11 +216,5 @@ def analyze_sequence_comprehensive_subprocess(
         ) from jde
 
     # Deserialize back to ComprehensiveAnalysisResult
-    return ComprehensiveAnalysisResult(
-        primary_monomer_fraction=result["primary_monomer_fraction"],
-        dimer_fraction=result["dimer_fraction"],
-        weighted_three_prime_unpaired_prob=result["weighted_three_prime_unpaired_prob"],
-        weighted_three_prime_unpaired_probs=tuple(result["weighted_three_prime_unpaired_probs"]),
-        weighted_dimer_three_prime_paired_prob=result["weighted_dimer_three_prime_paired_prob"],
-        weighted_dimer_three_prime_paired_probs={k: tuple(v) for k, v in result["weighted_dimer_three_prime_paired_probs"].items()},
-    )
+    return result
+

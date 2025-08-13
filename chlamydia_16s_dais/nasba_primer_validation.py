@@ -28,7 +28,9 @@ from Bio import SeqIO
 from typing import Dict, Any, Callable, Optional, List
 import logging
 
-from chlamydia_16s_dais.nupack_subprocess import analyze_sequence_comprehensive_subprocess
+from chlamydia_16s_dais.nupack_subprocess import (
+    analyze_sequence_comprehensive_subprocess,
+)
 from util.cache_utils import (
     make_cache_path,
     read_cached_result,
@@ -52,16 +54,21 @@ from nasba_primer_thermodynamics import (
     NASBA_CONDITIONS,
     analyze_multi_primer_solution,
     calculate_weighted_three_prime_end_paired_probabilities,
+    ComprehensiveAnalysisResult,
+    analyze_sequence_comprehensive_inprocess,
 )
 from nupack_complex_analysis import (
     SequenceInput,
     ComplexAnalysisResult,
     ComplexResult,
+    analyze_sequence_complexes_inprocess,
 )
 from nupack_subprocess import (
     analyze_sequence_complexes_subprocess,
     SequenceParam,
 )
+
+do_inline = False
 
 
 # Subprocess-backed NUPACK analysis wrapper used by this module
@@ -72,69 +79,132 @@ def analyze_sequence_complexes(
     magnesium_millimolar: float = 12.0,
     max_complex_size: int = 4,
     base_pairing_analysis: bool = False,
+    timeout_seconds: int = 250,
 ) -> ComplexAnalysisResult:
-    # Build worker payload sequences
-    seq_params = [
-        SequenceParam(
-            name=s.name,
-            sequence=s.sequence,
-            concentration_M=s.concentration_M,
+
+    if do_inline:
+        return analyze_sequence_complexes_inprocess(
+            temperature_celsius=temperature_celsius,
+            sequences=sequences,
+            sodium_millimolar=sodium_millimolar,
+            magnesium_millimolar=magnesium_millimolar,
+            max_complex_size=max_complex_size,
+            base_pairing_analysis=base_pairing_analysis,
         )
-        for s in sequences
-    ]
+    else:
 
-    # Run analysis in a fresh subprocess
-    result = analyze_sequence_complexes_subprocess(
-        temperature_celsius=temperature_celsius,
-        sequences=seq_params,
-        sodium_millimolar=sodium_millimolar,
-        magnesium_millimolar=magnesium_millimolar,
-        max_complex_size=max_complex_size,
-        base_pairing_analysis=base_pairing_analysis,
-    )
-
-    # Rehydrate ComplexResult objects
-    complexes: List[ComplexResult] = []
-    for c in result.get("complexes", []):
-        seq_id_map = {int(k): v for k, v in (c.get("sequence_id_map") or {}).items()}
-
-        unpaired = None
-        if c.get("unpaired_probability") is not None:
-            unpaired = {}
-            for k, v in c["unpaired_probability"].items():
-                seq_str, base_str = k.split(":")
-                unpaired[(int(seq_str), int(base_str))] = float(v)
-
-        pairing = None
-        if c.get("pairing_probability") is not None:
-            pairing = {}
-            for k, v in c["pairing_probability"].items():
-                left, right = k.split("|")
-                s1, b1 = left.split(":")
-                s2, b2 = right.split(":")
-                pairing[(int(s1), int(b1), int(s2), int(b2))] = float(v)
-
-        complexes.append(
-            ComplexResult(
-                complex_id=str(c["complex_id"]),
-                size=int(c["size"]),
-                concentration_molar=float(c["concentration_molar"]),
-                sequence_id_map=seq_id_map,
-                unpaired_probability=unpaired,
-                pairing_probability=pairing,
+        # Build worker payload sequences
+        seq_params = [
+            SequenceParam(
+                name=s.name,
+                sequence=s.sequence,
+                concentration_M=s.concentration_M,
             )
+            for s in sequences
+        ]
+        # Run analysis in a fresh subprocess
+        result = analyze_sequence_complexes_subprocess(
+            temperature_celsius=temperature_celsius,
+            sequences=seq_params,
+            sodium_millimolar=sodium_millimolar,
+            magnesium_millimolar=magnesium_millimolar,
+            max_complex_size=max_complex_size,
+            base_pairing_analysis=base_pairing_analysis,
+            timeout_seconds=timeout_seconds,
         )
 
-    return ComplexAnalysisResult(
-        temperature_celsius=float(result["temperature_celsius"]),
-        ionic_conditions={
-            "sodium_mM": float(result["ionic_conditions"]["sodium_mM"]),
-            "magnesium_mM": float(result["ionic_conditions"]["magnesium_mM"]),
-        },
-        max_complex_size=int(result["max_complex_size"]),
-        total_sequences=int(result["total_sequences"]),
-        complexes=complexes,
-    )
+        # Rehydrate ComplexResult objects
+        complexes: List[ComplexResult] = []
+        for c in result.get("complexes", []):
+            seq_id_map = {
+                int(k): v for k, v in (c.get("sequence_id_map") or {}).items()
+            }
+
+            unpaired = None
+            if c.get("unpaired_probability") is not None:
+                unpaired = {}
+                for k, v in c["unpaired_probability"].items():
+                    seq_str, base_str = k.split(":")
+                    unpaired[(int(seq_str), int(base_str))] = float(v)
+
+            pairing = None
+            if c.get("pairing_probability") is not None:
+                pairing = {}
+                for k, v in c["pairing_probability"].items():
+                    left, right = k.split("|")
+                    s1, b1 = left.split(":")
+                    s2, b2 = right.split(":")
+                    pairing[(int(s1), int(b1), int(s2), int(b2))] = float(v)
+
+            complexes.append(
+                ComplexResult(
+                    complex_id=str(c["complex_id"]),
+                    size=int(c["size"]),
+                    concentration_molar=float(c["concentration_molar"]),
+                    sequence_id_map=seq_id_map,
+                    unpaired_probability=unpaired,
+                    pairing_probability=pairing,
+                )
+            )
+
+        return ComplexAnalysisResult(
+            temperature_celsius=float(result["temperature_celsius"]),
+            ionic_conditions={
+                "sodium_mM": float(result["ionic_conditions"]["sodium_mM"]),
+                "magnesium_mM": float(result["ionic_conditions"]["magnesium_mM"]),
+            },
+            max_complex_size=int(result["max_complex_size"]),
+            total_sequences=int(result["total_sequences"]),
+            complexes=complexes,
+        )
+
+
+def analyze_sequence_comprehensive(
+    primary_sequence: str,
+    primary_sequence_name: str,
+    primary_sequence_concentration: float,
+    other_sequences: dict[str, str],  # from sequence name to sequence
+    other_sequence_concentrations: dict[str, float],
+    temp_celsius: float,
+    n_bases: int = 3,
+) -> ComprehensiveAnalysisResult:
+    if do_inline:
+        return analyze_sequence_comprehensive_inprocess(
+            primary_sequence=primary_sequence,
+            primary_sequence_name=primary_sequence_name,
+            primary_sequence_concentration=primary_sequence_concentration,
+            other_sequences=other_sequences,
+            other_sequence_concentrations=other_sequence_concentrations,
+            temp_celsius=temp_celsius,
+            n_bases=n_bases,
+        )
+    else:
+        result = analyze_sequence_comprehensive_subprocess(
+            primary_sequence=primary_sequence,
+            primary_sequence_name=primary_sequence_name,
+            primary_sequence_concentration=primary_sequence_concentration,
+            other_sequences=other_sequences,
+            other_sequence_concentrations=other_sequence_concentrations,
+            temp_celsius=temp_celsius,
+            n_bases=n_bases,
+        )
+        return ComprehensiveAnalysisResult(
+            primary_monomer_fraction=result["primary_monomer_fraction"],
+            dimer_fraction=result["dimer_fraction"],
+            weighted_three_prime_unpaired_prob=result[
+                "weighted_three_prime_unpaired_prob"
+            ],
+            weighted_three_prime_unpaired_probs=tuple(
+                result["weighted_three_prime_unpaired_probs"]
+            ),
+            weighted_dimer_three_prime_paired_prob=result[
+                "weighted_dimer_three_prime_paired_prob"
+            ],
+            weighted_dimer_three_prime_paired_probs={
+                k: tuple(v)
+                for k, v in result["weighted_dimer_three_prime_paired_probs"].items()
+            },
+        )
 
 
 # ============================================================================
@@ -290,7 +360,6 @@ def aggregate_results_from_cache(
         if res is not None:
             results.append(res)
     return results
-
 
 
 # ============================================================================
@@ -638,7 +707,7 @@ def calculate_3_prime_unpaired_probability(
             "No competing sequences provided. Cannot calculate unpaired probability without competition."
         )
 
-    comprehensive_result = analyze_sequence_comprehensive_subprocess(
+    comprehensive_result = analyze_sequence_comprehensive(
         primary_sequence=primer_seq,
         primary_sequence_name='target_primer',
         primary_sequence_concentration=TESTING_CONDITIONS['primer_concentration_nM']
@@ -978,7 +1047,7 @@ def test_3_individual_primer_dais_binding(
 
             # Calculate both monomer fraction and 3'-end unpaired probability
             # from a single multi-sequence NUPACK analysis
-            comprehensive_result = analyze_sequence_comprehensive_subprocess(
+            comprehensive_result = analyze_sequence_comprehensive(
                 primary_sequence=primer.sequence,
                 primary_sequence_name=f'primer_{primer.name}',
                 primary_sequence_concentration=TESTING_CONDITIONS[
@@ -1036,6 +1105,57 @@ def test_3_individual_primer_dais_binding(
     return results
 
 
+def construct_modified_rc_signal(
+    species: str, primers: List[ValidationPrimer], species_canonical: str
+) -> str:
+
+    rc_canonical = str(Seq(species_canonical).reverse_complement())
+
+    # Find a reverse primer for this species to get the reverse primer structure
+    reverse_primer = None
+    for p in primers:
+        if p.species == species and p.primer_type == 'reverse':
+            reverse_primer = p
+            break
+
+    if not reverse_primer:
+        raise ValueError(f"No reverse primer found for species {species}")
+
+    # Extract the generic + anchor + toehold part from reverse primer.
+    # Reverse primer structure: T7_parts + generic + anchor + toehold
+    # We need: generic + anchor + toehold (the part that binds to canonical)
+    full_reverse_seq = reverse_primer.sequence
+    binding_part = reverse_primer.anchor_sequence + reverse_primer.toehold_sequence
+
+    # Find where the binding part starts in the full reverse primer
+    rev_primer_binding_start = full_reverse_seq.find(binding_part)
+    if rev_primer_binding_start == -1:
+        raise ValueError(
+            f"Could not locate binding part in reverse primer {reverse_primer.name}"
+        )
+
+    primer_overhang = full_reverse_seq[:rev_primer_binding_start]
+
+    # Extract everything from the binding start (generic + anchor + toehold)
+    reverse_binding_portion = full_reverse_seq[rev_primer_binding_start:]
+
+    rc_canonical_binding_start = rc_canonical.find(binding_part)
+    if rc_canonical_binding_start == -1:
+        raise ValueError(
+            f"Could not locate binding part in canonical {species_canonical}"
+        )
+
+    rc_canonical_binding_start += len(binding_part)
+
+    rc_canonical_tail = rc_canonical[rc_canonical_binding_start:]
+
+    print(f'lengths for species {species}: {len(primer_overhang)=}, {len(reverse_binding_portion)=}, {len(rc_canonical_tail)=}')
+
+    modified_rc_signal = primer_overhang + reverse_binding_portion + rc_canonical_tail
+
+    return modified_rc_signal
+
+
 def test_4_primer_signal_binding_specificity(
     ct_primers: List[ValidationPrimer],
     ng_primers: List[ValidationPrimer],
@@ -1047,7 +1167,7 @@ def test_4_primer_signal_binding_specificity(
     Within the primer-signal dimer, the 2 3'-end bases of primer should be >90% bound.
 
     Signal construction:
-    - Forward primers: Optimal signal starts with reverse primer (generic + anchor + toehold)
+    - Forward primers: modified r.c. signal starts with reverse primer (generic + anchor + toehold)
       as RC, then continues with RC of the canonical sequence to the end
     - Reverse primers: Complete canonical sequence (forward strand)
 
@@ -1066,62 +1186,26 @@ def test_4_primer_signal_binding_specificity(
     ct_canonical = CANONICAL_SEQUENCES['CT']
     ng_canonical = CANONICAL_SEQUENCES['NG']
 
-    # Helper function to construct optimal forward signal
-    def construct_forward_signal(species: str, primers: List[ValidationPrimer]) -> str:
-        """
-        Construct optimal forward signal: RC of (reverse primer generic + anchor + toehold) + RC of canonical
-        """
-        canonical = ct_canonical if species == 'CT' else ng_canonical
-
-        # Find a reverse primer for this species to get the reverse primer structure
-        reverse_primer = None
-        for p in primers:
-            if p.species == species and p.primer_type == 'reverse':
-                reverse_primer = p
-                break
-
-        if not reverse_primer:
-            raise ValueError(f"No reverse primer found for species {species}")
-
-        # Extract the generic + anchor + toehold part from reverse primer.
-        # Reverse primer structure: T7_parts + generic + anchor + toehold
-        # We need: generic + anchor + toehold (the part that binds to canonical)
-        full_reverse_seq = reverse_primer.sequence
-        binding_part = reverse_primer.anchor_sequence + reverse_primer.toehold_sequence
-
-        # Find where the binding part starts in the full reverse primer
-        binding_start = full_reverse_seq.find(binding_part)
-        if binding_start == -1:
-            raise ValueError(
-                f"Could not locate binding part in reverse primer {reverse_primer.name}"
-            )
-
-        # Extract everything from the binding start (generic + anchor + toehold)
-        reverse_binding_portion = full_reverse_seq[binding_start:]
-
-        # Construct optimal forward signal
-        optimal_signal = str(Seq(reverse_binding_portion).reverse_complement()) + str(
-            Seq(canonical).reverse_complement()
-        )
-
-        return optimal_signal
-
     all_primers = ct_primers + ng_primers
 
     # Pre-construct forward signals for both species
-    forward_signals = {
-        'CT': construct_forward_signal('CT', all_primers),
-        'NG': construct_forward_signal('NG', all_primers),
+    modified_rc_signals = {
+        'CT': construct_modified_rc_signal(
+            species='CT', primers=all_primers, species_canonical=ct_canonical
+        ),
+        'NG': construct_modified_rc_signal(
+            species='NG', primers=all_primers, species_canonical=ng_canonical
+        ),
     }
 
     # Define all signals
     signals = {
         'CT': {
-            'forward': forward_signals['CT'],
+            'forward': modified_rc_signals['CT'],
             'reverse': ct_canonical,  # Forward strand for reverse primers
         },
         'NG': {
-            'forward': forward_signals['NG'],
+            'forward': modified_rc_signals['NG'],
             'reverse': ng_canonical,  # Forward strand for reverse primers
         },
     }
@@ -1244,10 +1328,14 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
 
     Each primer should NOT bind significantly to three unintended signals:
     1. Forward signal of the other pathogen (C.T vs. N.G)
+       Use the complete canonical sequence (forward strand) as the unintended signal
     2. Reverse signal of the other pathogen (C.T vs. N.G)
+       Use modified r.c. signal (reverse primer generic + anchor + toehold>) + RC of canonical
+       where 'RC of canonical' starts at the reverse primer's anchor+toehold domain
+       as the full r.c. of the signal is not expected to ever be present
     3. Wrong orientation signal of the same pathogen:
        - Forward primers: should not bind to canonical (forward) signal
-       - Reverse primers: should not bind to reverse complement of canonical
+       - Reverse primers: should not bind to reverse complement of canonical (again use modified r.c.)
 
     Requires multiple NUPACK runs (cannot place signal and its RC in the same tube).
     Uses 250nM primers, 10pM signal concentrations.
@@ -1267,43 +1355,18 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
 
     all_primers = ct_primers + ng_primers
 
-    # Helper function to construct optimal forward signal (reused from Test 4)
-    def construct_forward_signal(species: str, primers: List[ValidationPrimer]) -> str:
-        canonical = ct_canonical if species == 'CT' else ng_canonical
-
-        reverse_primer = None
-        for p in primers:
-            if p.species == species and p.primer_type == 'reverse':
-                reverse_primer = p
-                break
-
-        if not reverse_primer:
-            raise ValueError(f"No reverse primer found for species {species}")
-
-        full_reverse_seq = reverse_primer.sequence
-        binding_part = reverse_primer.anchor_sequence + reverse_primer.toehold_sequence
-
-        binding_start = full_reverse_seq.find(binding_part)
-        if binding_start == -1:
-            raise ValueError(
-                f"Could not locate binding part in reverse primer {reverse_primer.name}"
-            )
-
-        reverse_binding_portion = full_reverse_seq[binding_start:]
-        optimal_signal = str(Seq(reverse_binding_portion).reverse_complement()) + str(
-            Seq(canonical).reverse_complement()
-        )
-
-        return optimal_signal
-
     # Pre-construct all signals
     signals = {
         'CT': {
-            'forward': construct_forward_signal('CT', all_primers),
+            'forward': construct_modified_rc_signal(
+                species='CT', primers=all_primers, species_canonical=ct_canonical
+            ),
             'reverse': ct_canonical,
         },
         'NG': {
-            'forward': construct_forward_signal('NG', all_primers),
+            'forward': construct_modified_rc_signal(
+                species='NG', primers=all_primers, species_canonical=ng_canonical
+            ),
             'reverse': ng_canonical,
         },
     }
@@ -1312,14 +1375,14 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
     wrong_orientation_signals = {
         'CT': {
             'forward': ct_canonical,  # Forward primers should not bind to canonical (forward)
-            'reverse': str(
-                Seq(ct_canonical).reverse_complement()
+            'reverse': construct_modified_rc_signal(
+                species='NG', primers=all_primers, species_canonical=ng_canonical
             ),  # Reverse primers should not bind to RC
         },
         'NG': {
             'forward': ng_canonical,  # Forward primers should not bind to canonical (forward)
-            'reverse': str(
-                Seq(ng_canonical).reverse_complement()
+            'reverse': construct_modified_rc_signal(
+                species='CT', primers=all_primers, species_canonical=ct_canonical
             ),  # Reverse primers should not bind to RC
         },
     }
@@ -1331,10 +1394,10 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
         other_species = 'NG' if primer.species == 'CT' else 'CT'
 
         unintended_signals = [
-            # 1. Forward signal of the other pathogen
-            (f"other_pathogen_forward", signals[other_species]['forward']),
-            # 2. Reverse signal of the other pathogen
-            (f"other_pathogen_reverse", signals[other_species]['reverse']),
+            # 1. Reverse signal of the other pathogen
+            (f"other_pathogen_forward", signals[other_species]['reverse']),
+            # 2. Forward signal of the other pathogen
+            (f"other_pathogen_reverse", signals[other_species]['forward']),
             # 3. Wrong orientation signal of the same pathogen
             (
                 f"wrong_orientation",
@@ -1350,7 +1413,7 @@ def test_5_primer_cross_reactivity_with_unintended_signals(
 
             primer_seq_name = f'primer_{primer.name}'
 
-            comprehensive_result = analyze_sequence_comprehensive_subprocess(
+            comprehensive_result = analyze_sequence_comprehensive(
                 primary_sequence=primer.sequence,
                 primary_sequence_name=primer_seq_name,
                 primary_sequence_concentration=TESTING_CONDITIONS[
@@ -1433,7 +1496,7 @@ class DNAAmplicon:
     forward_anchor_toehold: str
     canonical_segment: str
     reverse_anchor_toehold_rc: str
-    reverse_noncomplementary_rc: str
+    reverse_generic_part_rc: str
 
 
 def construct_dna_amplicons(
@@ -1567,7 +1630,7 @@ def construct_dna_amplicons(
                 forward_anchor_toehold=forward_anchor_toehold,
                 canonical_segment=canonical_segment,
                 reverse_anchor_toehold_rc=reverse_anchor_toehold_rc,
-                reverse_noncomplementary_rc=reverse_noncomplementary_rc,
+                reverse_generic_part_rc=reverse_noncomplementary_rc,
             )
 
             amplicons[species].append(amplicon)
@@ -1630,7 +1693,7 @@ def _verify_amplicon_construction(
         + len(amplicon.forward_anchor_toehold)
         + len(amplicon.canonical_segment)
         + len(amplicon.reverse_anchor_toehold_rc)
-        + len(amplicon.reverse_noncomplementary_rc)
+        + len(amplicon.reverse_generic_part_rc)
     )
 
     if total_parts != amplicon.length:
@@ -1708,12 +1771,25 @@ def test_6_inter_pathogen_amplicon_cross_reactivity(
                 print(f"  Testing {pair_name}...")
                 print(f"    C.T sequence: {len(ct_seq)} bp")
                 print(f"    N.G sequence: {len(ng_seq)} bp")
+                print(f"    C.T sequence: {ct_seq}")
+                print(f"    N.G sequence: {ng_seq}")
 
                 # Set up NUPACK analysis with equal concentrations
                 # Using signal concentrations (10pM) since these are amplicons
                 amplicon_concentration_molar = (
                     TESTING_CONDITIONS['signal_concentration_pM'] * 1e-12
                 )
+
+                if pair_name in (
+                    "sense_vs_antisense", "antisense_vs_sense",
+                ):
+                    ct_fwd_gen = ct_amplicon.forward_generic_part
+                    ct_rev_gen = ct_amplicon.reverse_generic_part_rc
+                    ng_fwd_gen = ng_amplicon.forward_generic_part
+                    ng_rev_gen = ng_amplicon.reverse_generic_part_rc
+
+                    ct_seq = ct_seq[len(ct_fwd_gen):-len(ct_rev_gen)]
+                    ng_seq = ng_seq[len(ng_fwd_gen):-len(ng_rev_gen)]
 
                 sequences = [
                     SequenceInput(
@@ -1748,7 +1824,7 @@ def test_6_inter_pathogen_amplicon_cross_reactivity(
                     sequence_input_conc_molar=amplicon_concentration_molar,
                 )
                 ng_monomer_fraction = nupack_results.get_monomer_fraction(
-                    sequence_name="NG_{pair_name}",
+                    sequence_name=f"NG_{pair_name}",
                     sequence_input_conc_molar=amplicon_concentration_molar,
                 )
                 min_monomer_fraction = min(ct_monomer_fraction, ng_monomer_fraction)
@@ -1822,28 +1898,24 @@ def test_7_generic_primer_amplicon_binding_specificity(
     all_primers = ct_primers + ng_primers
     for primer in all_primers:
         expected_generic = generic_primers[primer.generic_set][primer.primer_type]
+        # Primers should contain generic sequence right before anchor sequence
+        if expected_generic not in primer.sequence:
+            raise ValueError(
+                f"Primer {primer.name} does not contain expected generic sequence: {expected_generic}"
+            )
 
-        if primer.primer_type == 'forward':
-            # Forward primers should start with generic sequence
-            if not primer.sequence.startswith(expected_generic):
-                raise ValueError(
-                    f"Primer {primer.name} does not start with expected generic sequence. "
-                    f"Expected: {expected_generic}, Got: {primer.sequence[:len(expected_generic)]}"
-                )
-        else:  # reverse
-            # Reverse primers should contain generic sequence after T7 parts
-            if expected_generic not in primer.sequence:
-                raise ValueError(
-                    f"Primer {primer.name} does not contain expected generic sequence: {expected_generic}"
-                )
+        # Verify the generic part is positioned correctly (should be before anchor)
+        generic_pos = primer.sequence.find(expected_generic)
+        anchor_pos = primer.sequence.find(primer.anchor_sequence)
+        if generic_pos == -1 or anchor_pos == -1 or generic_pos >= anchor_pos:
+            raise ValueError(
+                f"Generic sequence not positioned correctly in primer {primer.name}"
+            )
 
-            # Verify the generic part is positioned correctly (should be before anchor)
-            generic_pos = primer.sequence.find(expected_generic)
-            anchor_pos = primer.sequence.find(primer.anchor_sequence)
-            if generic_pos == -1 or anchor_pos == -1 or generic_pos >= anchor_pos:
-                raise ValueError(
-                    f"Generic sequence not positioned correctly in reverse primer {primer.name}"
-                )
+        if generic_pos + len(expected_generic) != anchor_pos:
+            raise ValueError(
+                f"Generic sequence not positioned in expected position in primer {primer.name}"
+            )
 
     print("✓ All NASBA primers verified to match expected generic sequences")
 
@@ -1867,15 +1939,17 @@ def test_7_generic_primer_amplicon_binding_specificity(
 
         # Test generic forward primer with sense amplicons (both C.T and N.G)
         for amplicon in ct_amplicons_set + ng_amplicons_set:
-            print(f"  Testing forward generic vs {amplicon.name} (sense)...")
+            print(f"  Testing forward generic vs {amplicon.name} (antisense)...")
+
+            antisense_amplicon = str(Seq(amplicon.sequence).reverse_complement())
 
             # Forward generic binds to sense amplicon
             _test_generic_primer_binding(
                 results,
                 f"generic_forward_{generic_set}",
                 forward_generic,
-                f"{amplicon.name}_sense",
-                amplicon.sequence,
+                f"{amplicon.name}_antisense",
+                antisense_amplicon,
                 "forward_vs_sense",
             )
 
@@ -1884,13 +1958,12 @@ def test_7_generic_primer_amplicon_binding_specificity(
             print(f"  Testing reverse generic vs {amplicon.name} (antisense)...")
 
             # Reverse generic binds to antisense amplicon
-            antisense_amplicon = str(Seq(amplicon.sequence).reverse_complement())
             _test_generic_primer_binding(
                 results,
                 f"generic_reverse_{generic_set}",
                 reverse_generic,
                 f"{amplicon.name}_antisense",
-                antisense_amplicon,
+                amplicon.sequence,
                 "reverse_vs_antisense",
             )
 
@@ -1915,7 +1988,7 @@ def _test_generic_primer_binding(
         TESTING_CONDITIONS['generic_signal_concentration_nM'] * 1e-9
     )  # Convert nM to M
 
-    comprehensive_result = analyze_sequence_comprehensive_subprocess(
+    comprehensive_result = analyze_sequence_comprehensive(
         primary_sequence=primer_sequence,
         primary_sequence_name=primer_name,
         primary_sequence_concentration=primer_concentration_molar,
@@ -2269,6 +2342,7 @@ def test_9_generic_primer_cross_reactivity_within_primer_set(
             magnesium_millimolar=12.0,
             max_complex_size=6,  # Allow up to 6-mer complexes
             base_pairing_analysis=True,
+            timeout_seconds=500,
         )
 
         # Test 1: Generic primers should not bind to each other
@@ -2480,31 +2554,37 @@ class ValidationContext:
     thresholds: Dict[str, float] = field(default_factory=lambda: VALIDATION_THRESHOLDS)
 
 
-def get_cached_primer_result(test_name: str, primer_name: str, context: ValidationContext) -> Optional[ValidationResult]:
+def get_cached_primer_result(
+    test_name: str, primer_name: str, context: ValidationContext
+) -> Optional[ValidationResult]:
     """Check if a specific primer result is already cached."""
     if not CACHE_ENABLED:
         return None
-    
+
     inputs_for_hash = {
         "test_name": test_name,
         "primer_name": primer_name,
         "temperature_c": NASBA_CONDITIONS["target_temp_C"],
         "thresholds": context.thresholds,
     }
-    
+
     cache_path = make_cache_path(
         test_id=test_name,
         primer_id=primer_name,
         inputs_for_hash=inputs_for_hash,
         cache_root=CACHE_ROOT,
     )
-    
+
     cached_data = read_cached_result(cache_path)
     if cached_data:
-        logging.debug(f"Cache HIT: Found cached result for test '{test_name}', primer '{primer_name}'")
+        logging.debug(
+            f"Cache HIT: Found cached result for test '{test_name}', primer '{primer_name}'"
+        )
         return test_result_dict_to_validation_result(cached_data)
     else:
-        logging.debug(f"Cache MISS: No cached result for test '{test_name}', primer '{primer_name}'")
+        logging.debug(
+            f"Cache MISS: No cached result for test '{test_name}', primer '{primer_name}'"
+        )
         return None
 
 
@@ -2598,24 +2678,32 @@ def run_selected_tests(
         # Check cache for each individual primer and collect cached results
         cached_results: List[ValidationResult] = []
         all_primer_names = get_all_primer_names_for_context(context)
-        
+
         for primer_name in all_primer_names:
             cached_result = get_cached_primer_result(test_name, primer_name, context)
             if cached_result:
                 cached_results.append(cached_result)
-        
+
         # Determine which primers still need testing (not in cache)
         cached_primer_names = {vr.primer_name for vr in cached_results}
         missing_primer_names = set(all_primer_names) - cached_primer_names
-        
+
         if missing_primer_names:
-            logging.debug(f"Running test '{test_name}' for {len(missing_primer_names)} uncached primers: {sorted(missing_primer_names)}")
+            logging.debug(
+                f"Running test '{test_name}' for {len(missing_primer_names)} uncached primers: {sorted(missing_primer_names)}"
+            )
             # Run the actual test computation (still runs all primers, but we'll filter results)
             all_computed_results: List[ValidationResult] = registry[test_name](context)
             # Only keep results for primers that weren't cached
-            computed_results = [vr for vr in all_computed_results if vr.primer_name in missing_primer_names]
+            computed_results = [
+                vr
+                for vr in all_computed_results
+                if vr.primer_name in missing_primer_names
+            ]
         else:
-            logging.debug(f"All primers for test '{test_name}' found in cache - skipping computation")
+            logging.debug(
+                f"All primers for test '{test_name}' found in cache - skipping computation"
+            )
             computed_results = []
 
         # Persist each computed result immediately and build a merge map
@@ -2643,7 +2731,9 @@ def run_selected_tests(
                 payload = asdict(vr)
                 payload.setdefault("test_id", test_name)
                 payload.setdefault("primer_id", primer_id)
-                logging.debug(f"Cache WRITE: Saving result for test '{test_name}', primer '{primer_id}' to {cache_path}")
+                logging.debug(
+                    f"Cache WRITE: Saving result for test '{test_name}', primer '{primer_id}' to {cache_path}"
+                )
                 write_cached_result(cache_path, payload)
 
         # Merge, preferring freshly computed results over cached

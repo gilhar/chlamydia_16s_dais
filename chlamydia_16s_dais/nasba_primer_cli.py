@@ -179,7 +179,7 @@ def test_sequence(sequence, temp):
     print(f"Testing sequence: {sequence}")
     print(f"Temperature: {temp}°C")
 
-    # Calculate bound fraction with its reverse complement
+    # Calculate the bound fraction with its reverse complement
     rc_sequence = str(Seq(sequence).reverse_complement())
     print(f"Reverse complement: {rc_sequence}")
 

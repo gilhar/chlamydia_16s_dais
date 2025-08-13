@@ -213,7 +213,7 @@ def get_base_primers() -> Dict[str, Dict[str, BasePrimer]]:
         }
 
     # Preserve desired ordering
-    order = ["S11"]  # , "TETR", "IMRS"]
+    order = ["S11", "TETR", "IMRS"]
     base_primers = {k: base_primers[k] for k in order}
     return base_primers
 
@@ -258,13 +258,17 @@ def extract_anchor_toehold_sequences(
 
     else:
         # Reverse primer: extract from the reverse complement of canonical
-        start_pos = end_pos - total_length + 1
-        if start_pos < 0:
+        # Convert canonical coordinate to canonical_rc coordinate
+        canonical_length = len(canonical)
+        rc_end_pos = canonical_length - 1 - end_pos
+        rc_start_pos = rc_end_pos - total_length + 1
+        
+        if rc_start_pos < 0:
             raise RuntimeError(
-                f'Extract reverse: Not enough bases in sequence: {start_pos=} {end_pos=} {total_length=}'
+                f'Extract reverse: Not enough bases in sequence: rc_start_pos={rc_start_pos} rc_end_pos={rc_end_pos} total_length={total_length}'
             )
 
-        combined_seq = canonical_rc[start_pos : end_pos + 1]
+        combined_seq = canonical_rc[rc_start_pos : rc_end_pos + 1]
         anchor_seq = combined_seq[:anchor_length]
         toehold_seq = combined_seq[anchor_length:]
 
